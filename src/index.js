@@ -10,7 +10,8 @@ const rateLimit = require('express-rate-limit');
 // Assurez-vous que ce fichier utilise process.env.MONGO_URI
 require('./config/db'); 
 
-const authRoutes       = require('./routes/auth');
+// On change './routes/auth' par './middleware/auth'
+const authRoutes = require('./middleware/auth');
 const structureRoutes  = require('./routes/structures');
 const pharmacieRoutes  = require('./routes/pharmacies');
 const laboRoutes       = require('./routes/laboratoires');
