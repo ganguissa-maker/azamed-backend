@@ -7,11 +7,15 @@ const morgan    = require('morgan');
 const rateLimit = require('express-rate-limit');
 
 // ─── CONNEXION BASE DE DONNÉES ───────────────────────────────
-// Assurez-vous que ce fichier utilise process.env.MONGO_URI
-require('./config/db'); 
+const { PrismaClient } = require('@prisma/client');
+const prisma = new PrismaClient();
 
-// On change './routes/auth' par './middleware/auth'
-const authRoutes = require('./middleware/auth');
+// Test de connexion à la base de données
+prisma.$connect()
+  .then(() => console.log('✅ Connexion à la base de données (Prisma) réussie'))
+  .catch((err) => console.error('❌ Erreur de connexion Prisma:', err));
+
+const authRoutes = require('./routes/auth');
 const structureRoutes  = require('./routes/structures');
 const pharmacieRoutes  = require('./routes/pharmacies');
 const laboRoutes       = require('./routes/laboratoires');
