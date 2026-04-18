@@ -1,21 +1,46 @@
-// src/index.js — Backend AZAMED (Optimisé pour la Production)
 require('dotenv').config();
 const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
 const morgan    = require('morgan');
-const rateLimit = require('express-rate-limit');
 
-// ─── CONNEXION BASE DE DONNÉES ───────────────────────────────
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const app  = express();
+const PORT = process.env.PORT || 5000;
 
-// Test de connexion à la base de données
-prisma.$connect()
-  .then(() => console.log('✅ Connexion à la base de données (Prisma) réussie'))
-  .catch((err) => console.error('❌ Erreur de connexion Prisma:', err));
+// ── Middlewares ───────────────────────────────────────────────
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(morgan('dev'));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-const authRoutes = require('./routes/auth');
+// ── CORS ─────────────────────────────────────────────────────
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  process.env.PUBLIC_URL,
+  process.env.STRUCTURES_URL,
+  process.env.ADMIN_URL,
+].filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    // En production accepter toutes les origines Vercel
+    if (origin.endsWith('.vercel.app')) return callback(null, true);
+    callback(null, true); // temporairement tout accepter
+  },
+  credentials: true,
+}));
+
+// ── Health check ─────────────────────────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', app: 'AZAMED API', timestamp: new Date().toISOString() });
+});
+
+// ── Routes ───────────────────────────────────────────────────
+const authRoutes       = require('./routes/auth');
 const structureRoutes  = require('./routes/structures');
 const pharmacieRoutes  = require('./routes/pharmacies');
 const laboRoutes       = require('./routes/laboratoires');
@@ -26,52 +51,6 @@ const abonnementRoutes = require('./routes/abonnements');
 const adminRoutes      = require('./routes/admin');
 const analyticsRoutes  = require('./routes/analytics');
 
-const app  = express();
-const PORT = process.env.PORT || 5000;
-
-// ─── CONFIGURATION DES CORS ───────────────────────────────────
-// On garde localhost pour le développement ET les variables pour la production
-const allowedOrigins = [
-  'http://localhost:5173',   
-  'http://localhost:5174',   
-  'http://localhost:5175',   
-  process.env.PUBLIC_URL,    
-  process.env.STRUCTURES_URL,
-  process.env.ADMIN_URL,
-].filter(Boolean); // Supprime les entrées vides si les variables .env ne sont pas encore définies
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Autorise les requêtes sans origine (comme Postman ou les apps mobiles)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else {
-      // En production, on refuse les origines non répertoriées
-      callback(new Error('Non autorisé par CORS'));
-    }
-  },
-  credentials: true,
-}));
-
-// ─── SÉCURITÉ ET MIDDLEWARES ──────────────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: false }));
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-
-// ─── LIMITATION DE REQUÊTES ───────────────────────────────────
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, 
-  max: 300,
-  message: { error: 'Trop de requêtes, réessayez dans 15 minutes.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use('/api/', generalLimiter);
-
-// ─── ROUTES ───────────────────────────────────────────────────
 app.use('/api/auth',         authRoutes);
 app.use('/api/structures',   structureRoutes);
 app.use('/api/pharmacies',   pharmacieRoutes);
@@ -83,35 +62,37 @@ app.use('/api/abonnements',  abonnementRoutes);
 app.use('/api/admin',        adminRoutes);
 app.use('/api/analytics',    analyticsRoutes);
 
-// Route de santé pour Render
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ 
-    status: 'OK', 
-    env: process.env.NODE_ENV || 'development',
-    timestamp: new Date().toISOString() 
-  });
+// ── Route temporaire création admin ──────────────────────────
+app.get('/api/create-admin', async (req, res) => {
+  try {
+    const { PrismaClient } = require('@prisma/client');
+    const bcrypt = require('bcryptjs');
+    const prisma = new PrismaClient();
+    const hash = await bcrypt.hash('Admin@AZAMED2024', 10);
+    const user = await prisma.user.upsert({
+      where:  { email: 'admin@azamed.com' },
+      update: { passwordHash: hash, role: 'ADMIN', isVerified: true, isActive: true },
+      create: { email: 'admin@azamed.com', passwordHash: hash, role: 'ADMIN', isVerified: true, isActive: true },
+    });
+    res.json({ ok: true, email: user.email, role: user.role });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-// Gestion des erreurs 404
+// ── 404 ──────────────────────────────────────────────────────
 app.use('*', (req, res) => {
   res.status(404).json({ error: `Route non trouvée : ${req.originalUrl}` });
 });
 
-// Gestionnaire d'erreurs global
+// ── Erreurs globales ─────────────────────────────────────────
 app.use((err, req, res, next) => {
-  console.error('❌ Erreur :', err.message);
-  const statusCode = err.status || 500;
-  res.status(statusCode).json({ 
-    error: process.env.NODE_ENV === 'production' 
-      ? 'Une erreur interne est survenue' 
-      : err.message 
-  });
+  console.error('❌', err.message);
+  res.status(err.status || 500).json({ error: err.message });
 });
 
-// ─── DÉMARRAGE ────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 AZAMED API opérationnelle sur le port ${PORT}`);
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(`📡 Origines autorisées : ${allowedOrigins.join(' | ')}`);
-  }
+// ── Démarrage ─────────────────────────────────────────────────
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`\n🚀 AZAMED API → http://0.0.0.0:${PORT}`);
+  console.log(`✅ Routes chargées : auth, structures, pharmacies, labos, hopitaux, posts, search, admin`);
 });
