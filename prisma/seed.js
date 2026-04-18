@@ -1,4 +1,5 @@
 // src/prisma/seed.js — AZAMED Cameroun — Base médicale complète
+process.env.DATABASE_URL = "postgresql://postgres:VxsJGpRQLqhVpGOhAbnRmSCpNSGIQLCM@monorail.proxy.rlwy.net:47229/railway";
 const { PrismaClient } = require('@prisma/client');
 const bcrypt = require('bcryptjs');
 const prisma = new PrismaClient();
