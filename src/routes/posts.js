@@ -1,207 +1,158 @@
-// src/routes/posts.js
+// src/routes/posts.js — avec support images et vidéos
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
-const { protect, structureOnly, ownStructure, adminOnly } = require('../middleware/auth');
+const { protect, structureOnly } = require('../middleware/auth');
+const multer = require('multer');
 
 const prisma = new PrismaClient();
 
-// Limites de posts selon abonnement
-const LIMITE_POSTS = {
-  BASIC: { par: 'semaine', max: 1 },
-  PREMIUM1: { par: 'jour', max: 2 },
-  PREMIUM2: { par: 'jour', max: 5 },
-};
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg','image/png','image/webp','image/gif','video/mp4','video/webm','video/quicktime'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Format non supporté. Images (JPG, PNG, WEBP) et vidéos (MP4, WEBM) uniquement.'));
+  },
+});
 
-async function getNombrePostsRecents(structureId, niveau) {
-  const config = LIMITE_POSTS[niveau] || LIMITE_POSTS.BASIC;
-  let depuis;
-  if (config.par === 'jour') {
-    depuis = new Date();
-    depuis.setHours(0, 0, 0, 0);
-  } else {
-    depuis = new Date();
-    depuis.setDate(depuis.getDate() - depuis.getDay()); // début de semaine
-    depuis.setHours(0, 0, 0, 0);
-  }
-
-  return prisma.post.count({
-    where: {
-      structureId,
-      isActive: true,
-      createdAt: { gte: depuis },
-    },
-  });
-}
-
-// ─── GET /api/posts — Fil d'actualité public ──────────────────
+// ─── GET /api/posts ──────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { pays, ville, quartier, typeStructure, structureId, page = 1, limit = 20 } = req.query;
+    const { page = 1, limit = 20, structureId, typeStructure, ville } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const structureWhere = { isActive: true };
-    if (pays) structureWhere.pays = { contains: pays, mode: 'insensitive' };
-    if (ville) structureWhere.ville = { contains: ville, mode: 'insensitive' };
-    if (quartier) structureWhere.quartier = { contains: quartier, mode: 'insensitive' };
-    if (typeStructure) structureWhere.typeStructure = typeStructure;
-
-    const where = {
-      isApproved: true,
-      isActive: true,
-      structure: structureWhere,
-    };
+    const where = { isActive: true, isApproved: true };
     if (structureId) where.structureId = structureId;
 
-    const [posts, total] = await Promise.all([
+    if (typeStructure || ville) {
+      where.structure = {};
+      if (typeStructure) where.structure.typeStructure = typeStructure;
+      if (ville) where.structure.ville = { contains: ville, mode: 'insensitive' };
+    }
+
+    const [data, total] = await Promise.all([
       prisma.post.findMany({
         where,
-        include: {
-          structure: {
-            select: {
-              id: true, nomCommercial: true, logoUrl: true, typeStructure: true, ville: true,
-              abonnements: { orderBy: { createdAt: 'desc' }, take: 1 },
-            },
-          },
-        },
         skip,
         take: parseInt(limit),
-        orderBy: [
-          { isPinned: 'desc' },
-          { createdAt: 'desc' },
-        ],
+        orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+        include: {
+          structure: {
+            include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
+          },
+        },
       }),
       prisma.post.count({ where }),
     ]);
 
-    // Trier : PREMIUM2 > PREMIUM1 > BASIC, puis par date
-    const enriched = posts.map((p) => ({
-      ...p,
-      structure: {
-        ...p.structure,
-        niveauAbonnement: p.structure.abonnements[0]?.niveau || 'BASIC',
-      },
-    }));
-
-    const order = { PREMIUM2: 0, PREMIUM1: 1, BASIC: 2 };
-    enriched.sort((a, b) => {
-      const diff = order[a.structure.niveauAbonnement] - order[b.structure.niveauAbonnement];
-      if (diff !== 0) return diff;
-      return new Date(b.createdAt) - new Date(a.createdAt);
+    res.json({
+      data,
+      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
     });
-
-    res.json({ data: enriched, pagination: { total, page: parseInt(page), limit: parseInt(limit) } });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur fil actualité.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── POST /api/posts — Créer un post ─────────────────────────
-router.post('/', protect, structureOnly, async (req, res) => {
+// ─── POST /api/posts ─────────────────────────────────────────
+router.post('/', protect, structureOnly, upload.single('media'), async (req, res) => {
   try {
-    const { contenu, typePost, mediaUrl, videoUrl } = req.body;
+    const { contenu, typePost, imageUrl: bodyImageUrl, videoUrl: bodyVideoUrl } = req.body;
 
-    if (!contenu || contenu.trim().length < 10) {
-      return res.status(400).json({ error: 'Contenu trop court (min. 10 caractères).' });
+    if (!contenu || contenu.length < 10) {
+      return res.status(400).json({ error: 'Le contenu doit avoir au moins 10 caractères.' });
     }
 
-    const structure = await prisma.structure.findUnique({
-      where: { userId: req.user.id },
-      include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
-    });
+    let imageUrl = bodyImageUrl || null;
+    let videoUrl = bodyVideoUrl || null;
 
-    if (!structure) return res.status(404).json({ error: 'Structure non trouvée.' });
-
-    const niveau = structure.abonnements[0]?.niveau || 'BASIC';
-    const limite = LIMITE_POSTS[niveau];
-    const nbPosts = await getNombrePostsRecents(structure.id, niveau);
-
-    if (nbPosts >= limite.max) {
-      return res.status(429).json({
-        error: `Limite atteinte : ${limite.max} post(s) par ${limite.par} pour le niveau ${niveau}.`,
-        limite: limite.max,
-        par: limite.par,
-        niveau,
-      });
+    // Upload Cloudinary si fichier présent et Cloudinary configuré
+    if (req.file && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_KEY !== 'placeholder') {
+      try {
+        const cloudinary = require('cloudinary').v2;
+        cloudinary.config({
+          cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+          api_key:    process.env.CLOUDINARY_API_KEY,
+          api_secret: process.env.CLOUDINARY_API_SECRET,
+        });
+        const b64     = Buffer.from(req.file.buffer).toString('base64');
+        const dataURI = `data:${req.file.mimetype};base64,${b64}`;
+        const isVideo = req.file.mimetype.startsWith('video/');
+        const result  = await cloudinary.uploader.upload(dataURI, {
+          resource_type: isVideo ? 'video' : 'image',
+          folder: 'azamed/posts',
+        });
+        if (isVideo) videoUrl = result.secure_url;
+        else         imageUrl = result.secure_url;
+      } catch (uploadErr) {
+        console.error('Cloudinary upload error:', uploadErr.message);
+      }
     }
 
-    // PREMIUM2 uniquement peut poster des vidéos
-    if (videoUrl && niveau !== 'PREMIUM2') {
-      return res.status(403).json({ error: 'Vidéos disponibles uniquement pour PREMIUM 2.' });
-    }
+    const structureId = req.user.structure?.id;
+    if (!structureId) return res.status(400).json({ error: 'Structure introuvable.' });
 
     const post = await prisma.post.create({
       data: {
-        structureId: structure.id,
-        contenu: contenu.trim(),
-        typePost: typePost || 'AUTRE',
-        mediaUrl,
+        contenu,
+        typePost:   typePost || 'AUTRE',
+        structureId,
+        imageUrl,
         videoUrl,
-        isApproved: true, // Auto-approuvé (modération optionnelle)
+        isApproved: true,
+        isActive:   true,
       },
       include: {
         structure: {
-          select: { id: true, nomCommercial: true, logoUrl: true, typeStructure: true },
+          include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
         },
       },
     });
 
     res.status(201).json(post);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur création post.' });
+    console.error('Create post error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── DELETE /api/posts/:id — Supprimer un post ───────────────
+// ─── DELETE /api/posts/:id ───────────────────────────────────
 router.delete('/:id', protect, structureOnly, async (req, res) => {
   try {
-    const post = await prisma.post.findUnique({ where: { id: req.params.id } });
-    if (!post) return res.status(404).json({ error: 'Post non trouvé.' });
-
-    const structure = await prisma.structure.findUnique({ where: { userId: req.user.id } });
-    if (post.structureId !== structure?.id && req.user.role !== 'ADMIN') {
-      return res.status(403).json({ error: 'Non autorisé.' });
-    }
-
     await prisma.post.update({ where: { id: req.params.id }, data: { isActive: false } });
-    res.json({ message: 'Post supprimé.' });
+    res.json({ message: 'Publication supprimée.' });
   } catch (err) {
-    res.status(500).json({ error: 'Erreur.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── PUT /api/posts/:id/epingler — Épingler (PREMIUM2) ───────
+// ─── PUT /api/posts/:id/epingler ─────────────────────────────
 router.put('/:id/epingler', protect, structureOnly, async (req, res) => {
   try {
-    const post = await prisma.post.findUnique({ where: { id: req.params.id } });
-    const structure = await prisma.structure.findUnique({
-      where: { userId: req.user.id },
-      include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
-    });
-
-    if (post.structureId !== structure?.id) return res.status(403).json({ error: 'Non autorisé.' });
-
-    const niveau = structure.abonnements[0]?.niveau;
-    if (niveau !== 'PREMIUM2') {
-      return res.status(403).json({ error: 'Épinglage disponible uniquement pour PREMIUM 2.' });
-    }
-
-    // Désépingler les autres posts de cette structure
-    await prisma.post.updateMany({
-      where: { structureId: structure.id, isPinned: true },
-      data: { isPinned: false },
-    });
-
+    const post    = await prisma.post.findUnique({ where: { id: req.params.id } });
+    if (!post) return res.status(404).json({ error: 'Post introuvable.' });
     const updated = await prisma.post.update({
       where: { id: req.params.id },
-      data: { isPinned: !post.isPinned },
+      data:  { isPinned: !post.isPinned },
     });
-
     res.json(updated);
   } catch (err) {
-    res.status(500).json({ error: 'Erreur.' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/posts/track-view ──────────────────────────────
+router.post('/track-view', async (req, res) => {
+  try {
+    const { page } = req.body;
+    await prisma.analyticsEvent.create({
+      data: { type: 'VUE_PAGE', query: page || 'home' },
+    }).catch(() => {});
+    res.json({ ok: true });
+  } catch {
+    res.json({ ok: true });
   }
 });
 

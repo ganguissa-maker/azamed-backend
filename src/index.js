@@ -27,9 +27,8 @@ app.use(cors({
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    // En production accepter toutes les origines Vercel
     if (origin.endsWith('.vercel.app')) return callback(null, true);
-    callback(null, true); // temporairement tout accepter
+    callback(null, true);
   },
   credentials: true,
 }));
@@ -41,6 +40,7 @@ app.get('/api/health', (req, res) => {
 
 // ── Routes ───────────────────────────────────────────────────
 const authRoutes       = require('./routes/auth');
+const userRoutes       = require('./routes/users');
 const structureRoutes  = require('./routes/structures');
 const pharmacieRoutes  = require('./routes/pharmacies');
 const laboRoutes       = require('./routes/laboratoires');
@@ -52,6 +52,7 @@ const adminRoutes      = require('./routes/admin');
 const analyticsRoutes  = require('./routes/analytics');
 
 app.use('/api/auth',         authRoutes);
+app.use('/api/users',        userRoutes);
 app.use('/api/structures',   structureRoutes);
 app.use('/api/pharmacies',   pharmacieRoutes);
 app.use('/api/laboratoires', laboRoutes);
@@ -61,24 +62,6 @@ app.use('/api/search',       searchRoutes);
 app.use('/api/abonnements',  abonnementRoutes);
 app.use('/api/admin',        adminRoutes);
 app.use('/api/analytics',    analyticsRoutes);
-
-// ── Route temporaire création admin ──────────────────────────
-app.get('/api/create-admin', async (req, res) => {
-  try {
-    const { PrismaClient } = require('@prisma/client');
-    const bcrypt = require('bcryptjs');
-    const prisma = new PrismaClient();
-    const hash = await bcrypt.hash('Admin@AZAMED2024', 10);
-    const user = await prisma.user.upsert({
-      where:  { email: 'admin@azamed.com' },
-      update: { passwordHash: hash, role: 'ADMIN', isVerified: true, isActive: true },
-      create: { email: 'admin@azamed.com', passwordHash: hash, role: 'ADMIN', isVerified: true, isActive: true },
-    });
-    res.json({ ok: true, email: user.email, role: user.role });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
 // ── 404 ──────────────────────────────────────────────────────
 app.use('*', (req, res) => {
@@ -94,5 +77,5 @@ app.use((err, req, res, next) => {
 // ── Démarrage ─────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 AZAMED API → http://0.0.0.0:${PORT}`);
-  console.log(`✅ Routes chargées : auth, structures, pharmacies, labos, hopitaux, posts, search, admin`);
+  console.log(`✅ Routes : auth, users, structures, pharmacies, labos, hopitaux, posts, search, admin\n`);
 });
