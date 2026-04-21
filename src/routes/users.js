@@ -1,4 +1,4 @@
-// src/routes/users.js — Inscription/Connexion utilisateurs publics
+// src/routes/users.js — Complet avec route médecins publics
 const express = require('express');
 const router  = express.Router();
 const bcrypt  = require('bcryptjs');
@@ -25,7 +25,7 @@ router.post('/register', [
 
   const {
     email, password, prenom, nom, typeCompte,
-    telephone, ville, pays,
+    telephone, whatsapp, ville, pays,
     specialite, numeroOrdre, lieuExercice,
   } = req.body;
 
@@ -35,46 +35,47 @@ router.post('/register', [
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Créer l'utilisateur avec son profil
     const user = await prisma.user.create({
       data: {
         email,
         passwordHash,
-        role: typeCompte === 'MEDECIN' ? 'MEDECIN' : 'UTILISATEUR',
+        role:       typeCompte === 'MEDECIN' ? 'MEDECIN' : 'UTILISATEUR',
         isVerified: false,
-        isActive: true,
+        isActive:   true,
       },
     });
 
-    // Créer le profil séparément
-    await prisma.profilUtilisateur.create({
-      data: {
-        userId:       user.id,
-        prenom,
-        nom,
-        telephone:    telephone    || null,
-        ville:        ville        || null,
-        pays:         pays         || 'Cameroun',
-        typeCompte,
-        specialite:   typeCompte === 'MEDECIN' ? (specialite || null) : null,
-        numeroOrdre:  typeCompte === 'MEDECIN' ? (numeroOrdre || null) : null,
-        lieuExercice: typeCompte === 'MEDECIN' ? (lieuExercice || null) : null,
-      },
-    }).catch(() => null); // Si la table n'existe pas encore, ignorer
+    // Créer le profil
+    await prisma.$executeRawUnsafe(`
+      INSERT INTO "ProfilUtilisateur"
+        ("id","userId","prenom","nom","telephone","whatsapp","ville","pays","typeCompte","specialite","numeroOrdre","lieuExercice","createdAt","updatedAt")
+      VALUES
+        (gen_random_uuid()::text,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW(),NOW())
+      ON CONFLICT ("userId") DO NOTHING
+    `,
+      user.id, prenom, nom,
+      telephone || null, whatsapp || null,
+      ville || null, pays || 'Cameroun',
+      typeCompte,
+      typeCompte === 'MEDECIN' ? (specialite || null) : null,
+      typeCompte === 'MEDECIN' ? (numeroOrdre || null) : null,
+      typeCompte === 'MEDECIN' ? (lieuExercice || null) : null,
+    ).catch(async () => {
+      // Fallback si table n'existe pas encore
+      await setupTable();
+    });
 
-    const profil = await prisma.profilUtilisateur.findUnique({ where: { userId: user.id } }).catch(() => null);
+    let profil = null;
+    try {
+      const rows = await prisma.$queryRaw`SELECT * FROM "ProfilUtilisateur" WHERE "userId"=${user.id}`;
+      profil = rows[0] || null;
+    } catch {}
 
     const token = generateToken(user.id);
     res.status(201).json({
       message: 'Compte créé avec succès !',
       token,
-      user: {
-        id:         user.id,
-        email:      user.email,
-        role:       user.role,
-        isVerified: user.isVerified,
-        profil,
-      },
+      user: { id: user.id, email: user.email, role: user.role, isVerified: user.isVerified, profil },
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -94,30 +95,22 @@ router.post('/login', [
   const { email, password } = req.body;
   try {
     const user = await prisma.user.findUnique({ where: { email } });
-
     if (!user || !['UTILISATEUR', 'MEDECIN'].includes(user.role)) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
     }
-    if (!user.isActive) {
-      return res.status(401).json({ error: 'Compte désactivé. Contactez contactazamed@gmail.com' });
-    }
+    if (!user.isActive) return res.status(401).json({ error: 'Compte désactivé. Contactez contactazamed@gmail.com' });
 
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
 
-    const profil = await prisma.profilUtilisateur.findUnique({ where: { userId: user.id } }).catch(() => null);
+    let profil = null;
+    try {
+      const rows = await prisma.$queryRaw`SELECT * FROM "ProfilUtilisateur" WHERE "userId"=${user.id}`;
+      profil = rows[0] || null;
+    } catch {}
 
     const token = generateToken(user.id);
-    res.json({
-      token,
-      user: {
-        id:         user.id,
-        email:      user.email,
-        role:       user.role,
-        isVerified: user.isVerified,
-        profil,
-      },
-    });
+    res.json({ token, user: { id: user.id, email: user.email, role: user.role, isVerified: user.isVerified, profil } });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: err.message });
@@ -127,13 +120,71 @@ router.post('/login', [
 // ─── GET /api/users/me ───────────────────────────────────────
 router.get('/me', protect, async (req, res) => {
   try {
-    const user   = await prisma.user.findUnique({ where: { id: req.user.id } });
-    const profil = await prisma.profilUtilisateur.findUnique({ where: { userId: user.id } }).catch(() => null);
+    const user = await prisma.user.findUnique({ where: { id: req.user.id } });
+    let profil = null;
+    try {
+      const rows = await prisma.$queryRaw`SELECT * FROM "ProfilUtilisateur" WHERE "userId"=${user.id}`;
+      profil = rows[0] || null;
+    } catch {}
+    res.json({ id: user.id, email: user.email, role: user.role, isVerified: user.isVerified, profil });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/users/medecins — LISTE PUBLIQUE médecins vérifiés ──
+router.get('/medecins', async (req, res) => {
+  try {
+    const { search, specialite, ville, page = 1, limit = 12 } = req.query;
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    // Récupérer tous les médecins vérifiés
+    const whereUser = { role: 'MEDECIN', isVerified: true, isActive: true };
+
+    const users = await prisma.user.findMany({
+      where: whereUser,
+      skip,
+      take: parseInt(limit),
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, email: true, isVerified: true },
+    });
+
+    const total = await prisma.user.count({ where: whereUser });
+
+    // Enrichir avec profils
+    const enriched = await Promise.all(users.map(async (u) => {
+      let profil = null;
+      try {
+        const rows = await prisma.$queryRaw`SELECT * FROM "ProfilUtilisateur" WHERE "userId"=${u.id}`;
+        profil = rows[0] || null;
+      } catch {}
+      return { ...u, profil };
+    }));
+
+    // Filtrer par spécialité et ville
+    let filtered = enriched;
+    if (specialite) {
+      filtered = filtered.filter((m) =>
+        m.profil?.specialite?.toLowerCase().includes(specialite.toLowerCase())
+      );
+    }
+    if (ville) {
+      filtered = filtered.filter((m) =>
+        m.profil?.ville?.toLowerCase().includes(ville.toLowerCase())
+      );
+    }
+    if (search) {
+      filtered = filtered.filter((m) =>
+        `${m.profil?.prenom} ${m.profil?.nom}`.toLowerCase().includes(search.toLowerCase())
+      );
+    }
+
     res.json({
-      id: user.id, email: user.email, role: user.role,
-      isVerified: user.isVerified, profil,
+      data: filtered,
+      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
     });
   } catch (err) {
+    console.error('Medecins error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -142,7 +193,7 @@ router.get('/me', protect, async (req, res) => {
 router.get('/stats', async (req, res) => {
   try {
     const [total, medecins, utilisateurs] = await Promise.all([
-      prisma.user.count({ where: { role: { in: ['UTILISATEUR', 'MEDECIN'] }, isActive: true } }),
+      prisma.user.count({ where: { role: { in: ['UTILISATEUR','MEDECIN'] }, isActive: true } }),
       prisma.user.count({ where: { role: 'MEDECIN', isActive: true } }),
       prisma.user.count({ where: { role: 'UTILISATEUR', isActive: true } }),
     ]);
@@ -152,29 +203,41 @@ router.get('/stats', async (req, res) => {
   }
 });
 
-// ─── Route setup base (créer table ProfilUtilisateur si manquante) ──
+// ─── GET /api/users/setup ────────────────────────────────────
+// Créer la table ProfilUtilisateur si elle n'existe pas
+async function setupTable() {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "ProfilUtilisateur" (
+      "id"           TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "userId"       TEXT NOT NULL UNIQUE,
+      "prenom"       TEXT NOT NULL DEFAULT '',
+      "nom"          TEXT NOT NULL DEFAULT '',
+      "telephone"    TEXT,
+      "whatsapp"     TEXT,
+      "ville"        TEXT,
+      "pays"         TEXT DEFAULT 'Cameroun',
+      "typeCompte"   TEXT NOT NULL DEFAULT 'UTILISATEUR',
+      "specialite"   TEXT,
+      "numeroOrdre"  TEXT,
+      "lieuExercice" TEXT,
+      "avatarUrl"    TEXT,
+      "createdAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "ProfilUtilisateur_pkey" PRIMARY KEY ("id")
+    );
+  `);
+}
+
 router.get('/setup', async (req, res) => {
   try {
-    await prisma.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS "ProfilUtilisateur" (
-        "id"           TEXT NOT NULL DEFAULT gen_random_uuid()::text,
-        "userId"       TEXT NOT NULL UNIQUE,
-        "prenom"       TEXT NOT NULL DEFAULT '',
-        "nom"          TEXT NOT NULL DEFAULT '',
-        "telephone"    TEXT,
-        "ville"        TEXT,
-        "pays"         TEXT DEFAULT 'Cameroun',
-        "typeCompte"   TEXT NOT NULL DEFAULT 'UTILISATEUR',
-        "specialite"   TEXT,
-        "numeroOrdre"  TEXT,
-        "lieuExercice" TEXT,
-        "avatarUrl"    TEXT,
-        "createdAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "updatedAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        CONSTRAINT "ProfilUtilisateur_pkey" PRIMARY KEY ("id")
-      );
-    `);
-    res.json({ ok: true, message: 'Table ProfilUtilisateur créée ou déjà existante.' });
+    await setupTable();
+    // Ajouter colonnes imageUrl et videoUrl aux posts si manquantes
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Post" ADD COLUMN IF NOT EXISTS "imageUrl" TEXT`).catch(() => {});
+    await prisma.$executeRawUnsafe(`ALTER TABLE "Post" ADD COLUMN IF NOT EXISTS "videoUrl" TEXT`).catch(() => {});
+    // Ajouter roles si manquants dans l'enum
+    await prisma.$executeRawUnsafe(`ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'MEDECIN'`).catch(() => {});
+    await prisma.$executeRawUnsafe(`ALTER TYPE "Role" ADD VALUE IF NOT EXISTS 'UTILISATEUR'`).catch(() => {});
+    res.json({ ok: true, message: 'Setup effectué avec succès.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

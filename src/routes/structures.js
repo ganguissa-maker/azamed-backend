@@ -1,195 +1,134 @@
-// src/routes/structures.js
+// src/routes/structures.js — Seules les structures vérifiées sont visibles publiquement
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
-const { protect, structureOnly, ownStructure } = require('../middleware/auth');
+const { protect, structureOnly, adminOnly } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
 
-// ─── GET /api/structures — Liste publique avec filtres ────────
+// ─── GET /api/structures — liste publique (vérifiées seulement) ──
 router.get('/', async (req, res) => {
   try {
     const {
-      type, pays, ville, quartier, search,
-      page = 1, limit = 20, lat, lng, radius,
+      type, ville, search, page = 1, limit = 15,
     } = req.query;
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const where = { isActive: true };
-    if (type) where.typeStructure = type;
-    if (pays) where.pays = { contains: pays, mode: 'insensitive' };
-    if (ville) where.ville = { contains: ville, mode: 'insensitive' };
-    if (quartier) where.quartier = { contains: quartier, mode: 'insensitive' };
+    const where = {
+      isActive:   true,
+      isVerified: true, // ← SEULES LES STRUCTURES VÉRIFIÉES SONT VISIBLES
+    };
+
+    if (type)   where.typeStructure = type;
+    if (ville)  where.ville = { contains: ville, mode: 'insensitive' };
     if (search) {
       where.OR = [
         { nomCommercial: { contains: search, mode: 'insensitive' } },
-        { nomLegal: { contains: search, mode: 'insensitive' } },
-        { description: { contains: search, mode: 'insensitive' } },
+        { ville:         { contains: search, mode: 'insensitive' } },
+        { quartier:      { contains: search, mode: 'insensitive' } },
+        { description:   { contains: search, mode: 'insensitive' } },
       ];
     }
 
-    const [structures, total] = await Promise.all([
+    const [data, total] = await Promise.all([
       prisma.structure.findMany({
         where,
         skip,
         take: parseInt(limit),
+        orderBy: { createdAt: 'desc' },
         include: {
           abonnements: { orderBy: { createdAt: 'desc' }, take: 1 },
-          _count: { select: { posts: true } },
         },
-        orderBy: [
-          // Premium d'abord (tri côté app selon abonnement)
-          { createdAt: 'desc' },
-        ],
       }),
       prisma.structure.count({ where }),
     ]);
 
-    // Enrichir avec le niveau d'abonnement actif
-    const enriched = structures.map((s) => ({
-      ...s,
-      niveauAbonnement: s.abonnements[0]?.niveau || 'BASIC',
-    }));
-
-    // Trier : PREMIUM2 > PREMIUM1 > BASIC
-    const order = { PREMIUM2: 0, PREMIUM1: 1, BASIC: 2 };
-    enriched.sort((a, b) => order[a.niveauAbonnement] - order[b.niveauAbonnement]);
-
     res.json({
-      data: enriched,
+      data,
       pagination: {
         total,
-        page: parseInt(page),
+        page:  parseInt(page),
         limit: parseInt(limit),
         pages: Math.ceil(total / parseInt(limit)),
       },
     });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur lors de la récupération des structures.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /api/structures/:id — Détail public ─────────────────
+// ─── GET /api/structures/:id — fiche détail (vérifiée seulement) ──
 router.get('/:id', async (req, res) => {
   try {
-    const structure = await prisma.structure.findUnique({
-      where: { id: req.params.id, isActive: true },
+    const structure = await prisma.structure.findFirst({
+      where: {
+        id:         req.params.id,
+        isActive:   true,
+        isVerified: true, // ← vérifiée obligatoirement
+      },
       include: {
         abonnements: { orderBy: { createdAt: 'desc' }, take: 1 },
-        posts: {
-          where: { isApproved: true, isActive: true },
-          orderBy: { createdAt: 'desc' },
-          take: 5,
-        },
-        _count: {
-          select: {
-            pharmacieMedicaments: { where: { disponible: true } },
-            laboExamens: { where: { disponible: true } },
-            hopitalServices: { where: { disponible: true } },
-          },
-        },
       },
     });
 
     if (!structure) {
-      return res.status(404).json({ error: 'Structure non trouvée.' });
+      return res.status(404).json({ error: 'Structure introuvable ou non vérifiée.' });
     }
 
-    // Enregistrer l'événement analytics
+    // Tracker la vue
     await prisma.analyticsEvent.create({
-      data: {
-        structureId: structure.id,
-        eventType: 'vue_profil',
-        userIp: req.ip,
-        userAgent: req.get('User-Agent'),
-      },
-    });
+      data: { type: 'VUE_STRUCTURE', structureId: structure.id },
+    }).catch(() => {});
 
-    res.json({
-      ...structure,
-      niveauAbonnement: structure.abonnements[0]?.niveau || 'BASIC',
-    });
+    res.json(structure);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── PUT /api/structures/:id — Mise à jour ────────────────────
-router.put('/:id', protect, structureOnly, ownStructure, async (req, res) => {
-  try {
-    const {
-      nomCommercial, nomLegal, telephone, whatsapp, email,
-      adresse, ville, quartier, latitude, longitude,
-      horaires, joursFeries, description, statutJuridique,
-      logoUrl, photoUrl,
-    } = req.body;
-
-    const updated = await prisma.structure.update({
-      where: { id: req.params.id },
-      data: {
-        nomCommercial, nomLegal, telephone, whatsapp, email,
-        adresse, ville, quartier, latitude, longitude,
-        horaires, joursFeries, description, statutJuridique,
-        logoUrl, photoUrl,
-      },
-    });
-
-    res.json({ message: 'Profil mis à jour.', structure: updated });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur mise à jour.' });
-  }
-});
-
-// ─── GET /api/structures/:id/stats — Stats (Premium) ─────────
-router.get('/:id/stats', protect, ownStructure, async (req, res) => {
+// ─── GET /api/structures/me — fiche de MA structure (authentifié) ──
+router.get('/me/profil', protect, structureOnly, async (req, res) => {
   try {
     const structure = await prisma.structure.findUnique({
-      where: { id: req.params.id },
-      include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
+      where: { userId: req.user.id },
+      include: {
+        abonnements: { orderBy: { createdAt: 'desc' }, take: 1 },
+      },
     });
+    if (!structure) return res.status(404).json({ error: 'Structure introuvable.' });
+    res.json(structure);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    const niveau = structure?.abonnements[0]?.niveau || 'BASIC';
+// ─── PUT /api/structures/:id — modifier ma structure ──────────
+router.put('/:id', protect, structureOnly, async (req, res) => {
+  try {
+    const {
+      nomCommercial, nomLegal, telephone, whatsapp, adresse,
+      pays, ville, quartier, description, horaires, latitude, longitude,
+    } = req.body;
 
-    // Stats de base (tous)
-    const vues7j = await prisma.analyticsEvent.count({
-      where: {
-        structureId: req.params.id,
-        eventType: 'vue_profil',
-        createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+    // Vérifier que c'est bien SA structure
+    if (req.user.structure?.id !== req.params.id && req.user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Accès non autorisé.' });
+    }
+
+    const structure = await prisma.structure.update({
+      where: { id: req.params.id },
+      data: {
+        nomCommercial, nomLegal, telephone, whatsapp, adresse,
+        pays, ville, quartier, description, horaires,
+        latitude:  latitude  ? parseFloat(latitude)  : undefined,
+        longitude: longitude ? parseFloat(longitude) : undefined,
       },
     });
 
-    const stats = { vues7j, niveau };
-
-    // Stats avancées (Premium seulement)
-    if (niveau === 'PREMIUM1' || niveau === 'PREMIUM2') {
-      const [clicsWhatsapp, clicsAppel, vues30j] = await Promise.all([
-        prisma.analyticsEvent.count({
-          where: { structureId: req.params.id, eventType: 'clic_whatsapp' },
-        }),
-        prisma.analyticsEvent.count({
-          where: { structureId: req.params.id, eventType: 'clic_appel' },
-        }),
-        prisma.analyticsEvent.count({
-          where: {
-            structureId: req.params.id,
-            eventType: 'vue_profil',
-            createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-          },
-        }),
-      ]);
-      stats.clicsWhatsapp = clicsWhatsapp;
-      stats.clicsAppel = clicsAppel;
-      stats.vues30j = vues30j;
-    }
-
-    res.json(stats);
+    res.json(structure);
   } catch (err) {
-    res.status(500).json({ error: 'Erreur stats.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
