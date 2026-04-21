@@ -1,209 +1,175 @@
 // src/routes/pharmacies.js
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
-const { protect, structureOnly, ownStructure } = require('../middleware/auth');
-
+const { protect, structureOnly } = require('../middleware/auth');
 const prisma = new PrismaClient();
 
 // ─── GET /api/pharmacies/catalogue/medicaments ────────────────
-// Catalogue COMPLET AZAMED — pas de filtre sur les structures
 router.get('/catalogue/medicaments', async (req, res) => {
   try {
-    const { search, classe, page = 1, limit = 500 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
+    const { search, categorie, page = 1, limit = 30 } = req.query;
+    const skip  = (parseInt(page) - 1) * parseInt(limit);
     const where = { isActive: true };
+    if (categorie) where.classeTherapeutique = { contains: categorie, mode: 'insensitive' };
     if (search) {
       where.OR = [
         { nomCommercial: { contains: search, mode: 'insensitive' } },
-        { dci: { contains: search, mode: 'insensitive' } },
+        { dci:           { contains: search, mode: 'insensitive' } },
         { classeTherapeutique: { contains: search, mode: 'insensitive' } },
       ];
     }
-    if (classe) {
-      where.classeTherapeutique = { contains: classe, mode: 'insensitive' };
-    }
-
     const [data, total] = await Promise.all([
-      prisma.medicament.findMany({
-        where,
-        skip,
-        take: parseInt(limit),
-        orderBy: [
-          { classeTherapeutique: 'asc' },
-          { nomCommercial: 'asc' },
-        ],
-      }),
+      prisma.medicament.findMany({ where, skip, take: parseInt(limit), orderBy: { nomCommercial: 'asc' } }),
       prisma.medicament.count({ where }),
     ]);
-
-    res.json({
-      data,
-      pagination: { total, page: parseInt(page), limit: parseInt(limit) },
-    });
+    res.json({ data, pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) } });
   } catch (err) {
-    console.error('Erreur catalogue médicaments:', err);
-    res.status(500).json({ error: 'Erreur serveur.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── GET /api/pharmacies/search?medicament=Paracétamol ────────
+// ─── GET /api/pharmacies/search ───────────────────────────────
 router.get('/search', async (req, res) => {
   try {
-    const { medicament, dci, classe, ville, disponible, page = 1, limit = 20 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
-    const medicamentWhere = {};
-    if (medicament) {
-      medicamentWhere.OR = [
-        { nomCommercial: { contains: medicament, mode: 'insensitive' } },
-        { dci: { contains: medicament, mode: 'insensitive' } },
-      ];
-    }
-    if (dci) medicamentWhere.dci = { contains: dci, mode: 'insensitive' };
-    if (classe) medicamentWhere.classeTherapeutique = { contains: classe, mode: 'insensitive' };
-
-    const pharmacieWhere = { typeStructure: 'PHARMACIE', isActive: true };
-    if (ville) pharmacieWhere.ville = { contains: ville, mode: 'insensitive' };
-
+    const { medicament, disponible, limit = 5 } = req.query;
+    if (!medicament) return res.json({ data: [] });
     const where = {
-      medicament: medicamentWhere,
-      pharmacie: pharmacieWhere,
-    };
-    if (disponible === 'true') {
-      where.disponible = true;
-      where.enStock = true;
-    }
-
-    const [results, total] = await Promise.all([
-      prisma.pharmacieMedicament.findMany({
-        where,
-        include: {
-          medicament: true,
-          pharmacie: {
-            include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
-          },
-        },
-        skip,
-        take: parseInt(limit),
-        orderBy: { prix: 'asc' },
-      }),
-      prisma.pharmacieMedicament.count({ where }),
-    ]);
-
-    const enriched = results.map((r) => ({
-      ...r,
-      pharmacie: {
-        ...r.pharmacie,
-        niveauAbonnement: r.pharmacie.abonnements[0]?.niveau || 'BASIC',
+      medicament: {
+        OR: [
+          { nomCommercial: { contains: medicament, mode: 'insensitive' } },
+          { dci:           { contains: medicament, mode: 'insensitive' } },
+        ],
       },
-    }));
-
-    res.json({ data: enriched, pagination: { total, page: parseInt(page), limit: parseInt(limit) } });
+      pharmacie: { isActive: true, isVerified: true },
+    };
+    if (disponible === 'true') where.enStock = true;
+    const data = await prisma.pharmacieMedicament.findMany({
+      where, take: parseInt(limit),
+      include: {
+        medicament: true,
+        pharmacie:  { select: { id: true, nomCommercial: true, ville: true, telephone: true } },
+      },
+      orderBy: { prix: 'asc' },
+    });
+    res.json({ data });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur recherche médicament.' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/pharmacies/garde ────────────────────────────────
+// Pharmacies de garde actuellement
+router.get('/garde', async (req, res) => {
+  try {
+    const { ville } = req.query;
+    const where = {
+      estDeGarde: true,
+      isActive:   true,
+      isVerified: true,
+    };
+    if (ville) where.ville = { contains: ville, mode: 'insensitive' };
+    const data = await prisma.structure.findMany({
+      where,
+      orderBy: { nomCommercial: 'asc' },
+      include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
+    });
+    res.json({ data, total: data.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
 // ─── GET /api/pharmacies/:id/medicaments ─────────────────────
 router.get('/:id/medicaments', async (req, res) => {
   try {
-    const { search, disponible, page = 1, limit = 500 } = req.query;
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
+    const { search, disponible, limit = 200 } = req.query;
     const where = { pharmacieId: req.params.id };
-    if (disponible === 'true') where.disponible = true;
-
-    const medWhere = {};
+    if (disponible === 'true') where.enStock = true;
     if (search) {
-      medWhere.OR = [
-        { nomCommercial: { contains: search, mode: 'insensitive' } },
-        { dci: { contains: search, mode: 'insensitive' } },
-        { classeTherapeutique: { contains: search, mode: 'insensitive' } },
-      ];
+      where.medicament = {
+        OR: [
+          { nomCommercial: { contains: search, mode: 'insensitive' } },
+          { dci:           { contains: search, mode: 'insensitive' } },
+        ],
+      };
     }
-
-    const [data, total] = await Promise.all([
-      prisma.pharmacieMedicament.findMany({
-        where: { ...where, medicament: medWhere },
-        include: { medicament: true },
-        skip,
-        take: parseInt(limit),
-        orderBy: { medicament: { nomCommercial: 'asc' } },
-      }),
-      prisma.pharmacieMedicament.count({ where: { ...where, medicament: medWhere } }),
-    ]);
-
-    res.json({ data, pagination: { total, page: parseInt(page), limit: parseInt(limit) } });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur.' });
-  }
-});
-
-// ─── PUT /api/pharmacies/:id/medicaments/:medicamentId ────────
-router.put('/:id/medicaments/:medicamentId', protect, structureOnly, async (req, res) => {
-  try {
-    const { disponible, enStock, prix, deGarde } = req.body;
-
-    const result = await prisma.pharmacieMedicament.upsert({
-      where: {
-        pharmacieId_medicamentId: {
-          pharmacieId: req.params.id,
-          medicamentId: req.params.medicamentId,
-        },
-      },
-      update: {
-        disponible: disponible ?? false,
-        enStock: enStock ?? false,
-        prix: prix ?? null,
-        deGarde: deGarde ?? false,
-      },
-      create: {
-        pharmacieId: req.params.id,
-        medicamentId: req.params.medicamentId,
-        disponible: disponible ?? false,
-        enStock: enStock ?? false,
-        prix: prix ?? null,
-        deGarde: deGarde ?? false,
-      },
+    const data = await prisma.pharmacieMedicament.findMany({
+      where, take: parseInt(limit),
       include: { medicament: true },
+      orderBy: { medicament: { nomCommercial: 'asc' } },
     });
-
-    res.json(result);
+    // Grouper par classe thérapeutique
+    const grouped = data.reduce((acc, m) => {
+      const key = m.medicament.classeTherapeutique || 'Autres';
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(m);
+      return acc;
+    }, {});
+    res.json({ data, grouped });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur mise à jour.' });
+    res.status(500).json({ error: err.message });
   }
 });
 
-// ─── PUT /api/pharmacies/:id/medicaments (batch) ─────────────
-router.put('/:id/medicaments', protect, structureOnly, async (req, res) => {
+// ─── POST /api/pharmacies/:id/medicaments ─────────────────────
+router.post('/:id/medicaments', protect, structureOnly, async (req, res) => {
   try {
-    const { updates } = req.body;
-    if (!Array.isArray(updates)) return res.status(400).json({ error: 'Tableau requis.' });
-
-    const results = await Promise.all(
-      updates.map((u) =>
-        prisma.pharmacieMedicament.upsert({
-          where: {
-            pharmacieId_medicamentId: {
-              pharmacieId: req.params.id,
-              medicamentId: u.medicamentId,
-            },
-          },
-          update: { disponible: u.disponible ?? false, enStock: u.enStock ?? false, prix: u.prix ?? null, deGarde: u.deGarde ?? false },
-          create: { pharmacieId: req.params.id, medicamentId: u.medicamentId, disponible: u.disponible ?? false, enStock: u.enStock ?? false, prix: u.prix ?? null, deGarde: u.deGarde ?? false },
-        })
-      )
-    );
-
-    res.json({ message: `${results.length} médicaments mis à jour.` });
+    const { medicamentId, prix, enStock } = req.body;
+    const existing = await prisma.pharmacieMedicament.findFirst({
+      where: { pharmacieId: req.params.id, medicamentId },
+    });
+    let result;
+    if (existing) {
+      result = await prisma.pharmacieMedicament.update({
+        where: { id: existing.id },
+        data: { prix: prix ? parseFloat(prix) : null, enStock: enStock !== false },
+        include: { medicament: true },
+      });
+    } else {
+      result = await prisma.pharmacieMedicament.create({
+        data: {
+          pharmacieId: req.params.id,
+          medicamentId,
+          prix:    prix ? parseFloat(prix) : null,
+          enStock: enStock !== false,
+        },
+        include: { medicament: true },
+      });
+    }
+    res.status(201).json(result);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Erreur.' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── DELETE /api/pharmacies/:id/medicaments/:medId ────────────
+router.delete('/:id/medicaments/:medId', protect, structureOnly, async (req, res) => {
+  try {
+    await prisma.pharmacieMedicament.deleteMany({
+      where: { pharmacieId: req.params.id, medicamentId: req.params.medId },
+    });
+    res.json({ message: 'Médicament retiré de la pharmacie.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── PUT /api/pharmacies/:id/garde ────────────────────────────
+// Activer/désactiver le mode garde de la pharmacie
+router.put('/:id/garde', protect, structureOnly, async (req, res) => {
+  try {
+    const { estDeGarde } = req.body;
+    const structure = await prisma.structure.update({
+      where: { id: req.params.id },
+      data:  { estDeGarde: Boolean(estDeGarde) },
+    });
+    res.json({
+      message: estDeGarde ? 'Pharmacie en mode garde activé.' : 'Mode garde désactivé.',
+      structure,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
