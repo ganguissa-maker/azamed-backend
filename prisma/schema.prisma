@@ -62,6 +62,7 @@ enum RoleUtilisateur {
   PATIENT
   STRUCTURE
   ADMIN
+  MEDECIN
 }
 
 // ============================================================
