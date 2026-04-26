@@ -1,5 +1,5 @@
 // prisma/schema.prisma
-// AZAMED - Schéma complet de la base de données
+// AZAMED - Schéma complet de la base de données (Version Finale Corrigée)
 
 generator client {
   provider = "prisma-client-js"
@@ -23,6 +23,9 @@ enum TypeStructure {
   CABINET_MEDICAL
   CABINET_SPECIALISE
   CENTRE_SANTE
+  CENTRE_IMAGERIE
+  POLYCLINIQUE
+  LABO_ET_IMAGERIE
   AUTRE
 }
 
@@ -62,6 +65,7 @@ enum RoleUtilisateur {
   PATIENT
   STRUCTURE
   ADMIN
+  MEDECIN
 }
 
 // ============================================================
@@ -69,17 +73,17 @@ enum RoleUtilisateur {
 // ============================================================
 
 model User {
-  id            String          @id @default(uuid())
-  email         String          @unique
-  passwordHash  String          @map("password_hash")
-  role          RoleUtilisateur @default(PATIENT)
-  isVerified    Boolean         @default(false) @map("is_verified")
-  isActive      Boolean         @default(true) @map("is_active")
-  createdAt     DateTime        @default(now()) @map("created_at")
-  updatedAt     DateTime        @updatedAt @map("updated_at")
+  id           String          @id @default(uuid())
+  email        String          @unique
+  passwordHash String          @map("password_hash")
+  role         RoleUtilisateur @default(PATIENT)
+  isVerified   Boolean         @default(false) @map("is_verified")
+  isActive     Boolean         @default(true) @map("is_active")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
 
-  structure     Structure?
-  recherches    HistoriqueRecherche[]
+  structure  Structure?
+  recherches HistoriqueRecherche[]
 
   @@map("users")
 }
@@ -89,40 +93,46 @@ model User {
 // ============================================================
 
 model Structure {
-  id              String          @id @default(uuid())
-  userId          String          @unique @map("user_id")
-  nomLegal        String          @map("nom_legal")
-  nomCommercial   String          @map("nom_commercial")
-  typeStructure   TypeStructure   @map("type_structure")
+  id              String           @id @default(uuid())
+  userId          String           @unique @map("user_id")
+  nomLegal        String           @map("nom_legal")
+  nomCommercial   String           @map("nom_commercial")
+  typeStructure   TypeStructure    @map("type_structure")
   telephone       String
   whatsapp        String?
   email           String?
-  adresse         String
-  pays            String          @default("Côte d'Ivoire")
+  adresse         String?          @map("adresse") // OPTIONNEL POUR ÉVITER LES ERREURS
+  pays            String           @default("Cameroun")
   ville           String
   quartier        String?
   latitude        Float?
   longitude       Float?
-  horaires        Json?           // { lundi: {debut: "08:00", fin: "18:00"}, ... }
-  joursFeries     Json?           @map("jours_feries")
-  logoUrl         String?         @map("logo_url")
-  photoUrl        String?         @map("photo_url")
+  horaires        Json?            
+  joursFeries     Json?            @map("jours_feries")
+  logoUrl         String?          @map("logo_url")
+  photoUrl        String?          @map("photo_url")
   description     String?
   statutJuridique StatutJuridique? @map("statut_juridique")
-  isVerified      Boolean         @default(false) @map("is_verified")
-  isActive        Boolean         @default(true) @map("is_active")
-  createdAt       DateTime        @default(now()) @map("created_at")
-  updatedAt       DateTime        @updatedAt @map("updated_at")
+  
+  // Champs pour la gestion de la garde et horaires rapides
+  estDeGarde      Boolean          @default(false) @map("est_de_garde")
+  medecinDeGarde  Boolean          @default(false) @map("medecin_de_garde")
+  heureOuverture  String?          @map("heure_ouverture")
+  heureFermeture  String?          @map("heure_fermeture")
 
-  user            User            @relation(fields: [userId], references: [id])
+  isVerified      Boolean          @default(false) @map("is_verified")
+  isActive        Boolean          @default(true) @map("is_active")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  user            User             @relation(fields: [userId], references: [id])
   abonnements     Abonnement[]
   posts           Post[]
   analyticsEvents AnalyticsEvent[]
   
-  // Relations spécifiques par type
-  pharmacieMedicaments  PharmacieMedicament[]
-  laboExamens           LaboExamen[]
-  hopitalServices       HopitalService[]
+  pharmacieMedicaments PharmacieMedicament[]
+  laboExamens          LaboExamen[]
+  hopitalServices      HopitalService[]
 
   @@map("structures")
 }
@@ -156,9 +166,9 @@ model Abonnement {
 model Medicament {
   id                   String   @id @default(uuid())
   nomCommercial        String   @map("nom_commercial")
-  dci                  String   // Dénomination Commune Internationale
+  dci                  String
   classeTherapeutique  String   @map("classe_therapeutique")
-  forme                String   // comprimé, sirop, injectable, etc.
+  forme                String
   dosage               String
   laboratoireFabricant String   @map("laboratoire_fabricant")
   isActive             Boolean  @default(true) @map("is_active")
@@ -170,31 +180,31 @@ model Medicament {
 }
 
 model PharmacieMedicament {
-  id           String    @id @default(uuid())
-  pharmacieId  String    @map("pharmacie_id")
-  medicamentId String    @map("medicament_id")
-  disponible   Boolean   @default(false)
-  enStock      Boolean   @default(false) @map("en_stock")
+  id           String   @id @default(uuid())
+  pharmacieId  String   @map("pharmacie_id")
+  medicamentId String   @map("medicament_id")
+  disponible   Boolean  @default(false)
+  enStock      Boolean  @default(false) @map("en_stock")
   prix         Float?
-  deGarde      Boolean   @default(false) @map("de_garde")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  deGarde      Boolean  @default(false) @map("de_garde")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
-  pharmacie    Structure  @relation(fields: [pharmacieId], references: [id])
-  medicament   Medicament @relation(fields: [medicamentId], references: [id])
+  pharmacie  Structure  @relation(fields: [pharmacieId], references: [id])
+  medicament Medicament @relation(fields: [medicamentId], references: [id])
 
   @@unique([pharmacieId, medicamentId])
   @@map("pharmacie_medicaments")
 }
 
 // ============================================================
-// MODULE LABORATOIRES
+// MODULE LABORATOIRES / IMAGERIE
 // ============================================================
 
 model Examen {
   id          String   @id @default(uuid())
   nom         String
   codeAzamed  String   @unique @map("code_azamed")
-  categorie   String   // Hématologie, Biochimie, Sérologie, etc.
+  categorie   String
   description String?
   isActive    Boolean  @default(true) @map("is_active")
   createdAt   DateTime @default(now()) @map("created_at")
@@ -205,32 +215,32 @@ model Examen {
 }
 
 model LaboExamen {
-  id          String   @id @default(uuid())
-  laboId      String   @map("labo_id")
-  examenId    String   @map("examen_id")
-  disponible  Boolean  @default(false)
-  prix        Float?
-  delaiMin    Int?     @map("delai_min")    // en heures
-  delaiMax    Int?     @map("delai_max")    // en heures
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id         String   @id @default(uuid())
+  laboId     String   @map("labo_id")
+  examenId   String   @map("examen_id")
+  disponible Boolean  @default(false)
+  prix       Float?
+  delaiMin   Int?     @map("delai_min")
+  delaiMax   Int?     @map("delai_max")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
-  labo        Structure @relation(fields: [laboId], references: [id])
-  examen      Examen    @relation(fields: [examenId], references: [id])
+  labo   Structure @relation(fields: [laboId], references: [id])
+  examen Examen    @relation(fields: [examenId], references: [id])
 
   @@unique([laboId, examenId])
   @@map("labo_examens")
 }
 
 // ============================================================
-// MODULE HÔPITAUX / STRUCTURES HOSPITALIÈRES
+// MODULE HÔPITAUX / SERVICES
 // ============================================================
 
 model ServiceMedical {
-  id          String   @id @default(uuid())
+  id          String  @id @default(uuid())
   nom         String
-  categorie   String   // Spécialité, Urgence, Transversal
+  categorie   String
   description String?
-  isActive    Boolean  @default(true) @map("is_active")
+  isActive    Boolean @default(true) @map("is_active")
 
   hopitalServices HopitalService[]
 
@@ -238,58 +248,50 @@ model ServiceMedical {
 }
 
 model HopitalService {
-  id                  String         @id @default(uuid())
-  hopitalId           String         @map("hopital_id")
-  serviceId           String         @map("service_id")
-  disponible          Boolean        @default(false)
-  surRdv              Boolean        @default(false) @map("sur_rdv")
-  horaires            Json?
-  prixConsultation    Float?         @map("prix_consultation")
-  prixChambre         Float?         @map("prix_chambre")
-  infoSupplementaire  String?        @map("info_supplementaire")
-  updatedAt           DateTime       @updatedAt @map("updated_at")
+  id                 String  @id @default(uuid())
+  hopitalId          String  @map("hopital_id")
+  serviceId          String  @map("service_id")
+  disponible         Boolean @default(false)
+  surRdv             Boolean @default(false) @map("sur_rdv")
+  horaires           Json?
+  modeConsultation   String? @default("JOURS_OUVRABLES") @map("mode_consultation")
+  prixConsultation   Float?  @map("prix_consultation")
+  prixChambre        Float?  @map("prix_chambre")
+  infoSupplementaire String? @map("info_supplementaire")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
-  hopital             Structure      @relation(fields: [hopitalId], references: [id])
-  service             ServiceMedical @relation(fields: [serviceId], references: [id])
+  hopital Structure      @relation(fields: [hopitalId], references: [id])
+  service ServiceMedical @relation(fields: [serviceId], references: [id])
 
   @@unique([hopitalId, serviceId])
   @@map("hopital_services")
 }
 
 // ============================================================
-// FIL D'ACTUALITÉ
+// AUTRES MODULES
 // ============================================================
 
 model Post {
-  id          String    @id @default(uuid())
-  structureId String    @map("structure_id")
+  id          String   @id @default(uuid())
+  structureId String   @map("structure_id")
   contenu     String
-  typePost    TypePost  @default(AUTRE) @map("type_post")
-  mediaUrl    String?   @map("media_url")
-  videoUrl    String?   @map("video_url")
-  isPinned    Boolean   @default(false) @map("is_pinned")
-  isApproved  Boolean   @default(true) @map("is_approved")
-  isActive    Boolean   @default(true) @map("is_active")
-  vues        Int       @default(0)
-  createdAt   DateTime  @default(now()) @map("created_at")
-  expiresAt   DateTime? @map("expires_at")
+  typePost    TypePost @default(AUTRE) @map("type_post")
+  mediaUrl    String?  @map("media_url")
+  isPinned    Boolean  @default(false) @map("is_pinned")
+  isApproved  Boolean  @default(true) @map("is_approved")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
 
   structure   Structure @relation(fields: [structureId], references: [id])
 
   @@map("posts")
 }
 
-// ============================================================
-// ANALYTICS
-// ============================================================
-
 model AnalyticsEvent {
   id          String   @id @default(uuid())
   structureId String?  @map("structure_id")
-  eventType   String   @map("event_type") // vue_profil, clic_whatsapp, clic_appel, etc.
+  eventType   String   @map("event_type")
   metadata    Json?
-  userIp      String?  @map("user_ip")
-  userAgent   String?  @map("user_agent")
   createdAt   DateTime @default(now()) @map("created_at")
 
   structure   Structure? @relation(fields: [structureId], references: [id])
@@ -297,15 +299,11 @@ model AnalyticsEvent {
   @@map("analytics_events")
 }
 
-// ============================================================
-// RECHERCHE
-// ============================================================
-
 model HistoriqueRecherche {
   id        String   @id @default(uuid())
   userId    String?  @map("user_id")
   query     String
-  type      String?  // medicament, examen, structure, service
+  type      String?
   createdAt DateTime @default(now()) @map("created_at")
 
   user      User?    @relation(fields: [userId], references: [id])
