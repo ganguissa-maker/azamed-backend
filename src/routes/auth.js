@@ -1,4 +1,4 @@
-// src/routes/auth.js — corrigé : adresse null + modules sauvegardés
+// src/routes/auth.js — VERSION FINALE CORRIGÉE
 const express = require('express');
 const router  = express.Router();
 const bcrypt  = require('bcryptjs');
@@ -16,7 +16,7 @@ const TYPES_VALIDES = [
   'CABINET_MEDICAL','CABINET_SPECIALISE','CENTRE_SANTE',
 ];
 
-// ─── POST /api/auth/register ──────────────────────────────────
+// --- POST /api/auth/register ---
 router.post('/register', [
   body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
   body('password').isLength({ min: 6 }).withMessage('Mot de passe : min. 6 caractères'),
@@ -30,9 +30,8 @@ router.post('/register', [
   const {
     email, password, typeStructure, nomLegal,
     telephone, whatsapp, adresse, pays, ville, quartier, description,
-    horaire24h7j, joursOuverture, heureOuverture, heureFermeture, horaires,
+    horaire24h7j, joursOuverture, heureOuverture, heureFermeture,
     modules, // objet { medicaments, examens, services, assurance }
-    // Champs spécifiques
     numAutorisationPharm, nomPharmacien,
     numAgrement, nomBiologiste, nomMedecinRadiologue, nomPromoteur,
     numMinistere, categorieStruct, nomDirecteur,
@@ -47,73 +46,50 @@ router.post('/register', [
     const passwordHash  = await bcrypt.hash(password, 12);
     const nomCommercial = nomLegal || `${typeStructure} ${ville}`;
 
-    // Description enrichie avec champs spécifiques
+    // On prépare les infos spécifiques
     const specifiques = [
-      numAutorisationPharm     && `N° Autorisation: ${numAutorisationPharm}`,
-      nomPharmacien            && `Pharmacien: ${nomPharmacien}`,
-      numAgrement              && `N° Agrément: ${numAgrement}`,
-      nomBiologiste            && `Biologiste: ${nomBiologiste}`,
-      nomMedecinRadiologue     && `Radiologue: ${nomMedecinRadiologue}`,
-      nomPromoteur             && `Promoteur: ${nomPromoteur}`,
-      numMinistere             && `N° Ministère: ${numMinistere}`,
-      categorieStruct          && `Catégorie: ${categorieStruct}`,
-      nomDirecteur             && `Directeur: ${nomDirecteur}`,
-      numAutorisationOuverture && `N° Autorisation: ${numAutorisationOuverture}`,
-      nomMedecinChef           && `Médecin chef: ${nomMedecinChef}`,
-      nomMedecin               && `Médecin: ${nomMedecin}`,
-      numOrdre                 && `N° Ordre: ${numOrdre}`,
-      nomResponsable           && `Responsable: ${nomResponsable}`,
+      numAutorisationPharm && `N° Aut: ${numAutorisationPharm}`,
+      nomPharmacien && `Pharma: ${nomPharmacien}`,
+      numAgrement && `Agrément: ${numAgrement}`,
+      numBiologiste && `Biologiste: ${nomBiologiste}`,
     ].filter(Boolean).join(' · ');
 
-    const descriptionFull = [description, specifiques].filter(Boolean).join(' — ') || '';
+    // --- CORRECTION DES MODULES ---
+    // On stocke les modules au début de la description pour pouvoir les extraire
+    const modulesStr = modules ? JSON.stringify(modules) : JSON.stringify({});
+    const descriptionFull = `MODULES_DATA:${modulesStr} | ${description || ''} ${specifiques}`.trim();
 
     // Horaires
-    let horairesFormatted = '';
-    if (horaire24h7j) {
-      horairesFormatted = '7j/7 24h/24';
-    } else if (Array.isArray(joursOuverture) && joursOuverture.length) {
-      horairesFormatted = `${joursOuverture.join(',')} ${heureOuverture || '08:00'}-${heureFermeture || '18:00'}`;
-    } else {
-      horairesFormatted = `${heureOuverture || '08:00'}-${heureFermeture || '18:00'}`;
-    }
-
-    // Modules → stocker en JSON dans le champ statutJuridique
-    const modulesStr = modules ? JSON.stringify(modules) : JSON.stringify({});
+    let horairesFormatted = horaire24h7j ? '7j/7 24h/24' : `${heureOuverture || '08:00'}-${heureFermeture || '18:00'}`;
 
     const user = await prisma.user.create({
       data: {
         email,
         passwordHash,
-        role:       'STRUCTURE',
-        isVerified: false,
-        isActive:   true,
+        role: 'STRUCTURE',
         structure: {
           create: {
             nomCommercial,
-            nomLegal:       nomLegal       || null,
+            nomLegal: nomLegal || null,
             typeStructure,
             telephone,
-            whatsapp:       whatsapp       || null,
-            // ✅ adresse ne peut pas être null selon le schema — on met chaîne vide si absent
-            adresse:        adresse        || '',
-            pays:           pays           || 'Cameroun',
+            whatsapp: whatsapp || null,
+            adresse: adresse || '', // Utilise chaîne vide si null
+            pays: pays || 'Cameroun',
             ville,
-            quartier:       quartier       || null,
-            description:    descriptionFull,
-            horaires:       horairesFormatted,
-            heureOuverture: horaire24h7j ? '00:00' : (heureOuverture || '08:00'),
-            heureFermeture: horaire24h7j ? '23:59' : (heureFermeture || '18:00'),
-            // ✅ Modules stockés ici
-            statutJuridique: modulesStr,
+            quartier: quartier || null,
+            description: descriptionFull, // On met tout ici
+            horaires: horairesFormatted,
+            statutJuridique: 'PRIVE', // Valeur ENUM valide pour éviter l'erreur
             isVerified: false,
-            isActive:   true,
+            isActive: true,
             abonnements: {
               create: {
-                niveau:        'BASIC',
-                dateDebut:     new Date(),
-                montant:       0,
-                devise:        'XOF',
-                statutPaiement:'CONFIRME',
+                niveau: 'BASIC',
+                dateDebut: new Date(),
+                montant: 0,
+                devise: 'XOF',
+                statutPaiement: 'CONFIRME',
               },
             },
           },
@@ -126,78 +102,59 @@ router.post('/register', [
       },
     });
 
-    // ✅ Parser les modules pour les retourner dans la réponse
-    let parsedModules = {};
-    try { parsedModules = JSON.parse(modulesStr); } catch {}
-
     const token = generateToken(user.id);
     res.status(201).json({
       message: 'Compte créé avec succès !',
       token,
       user: {
-        id:         user.id,
-        email:      user.email,
-        role:       user.role,
-        isVerified: user.isVerified,
-        structure:  { ...user.structure, modules: parsedModules },
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        structure: { ...user.structure, modules: modules || {} },
       },
     });
   } catch (err) {
     console.error('Register error:', err);
-    if (err.code === 'P2002') return res.status(400).json({ error: 'Email déjà utilisé.' });
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Erreur lors de l'inscription." });
   }
 });
 
-// ─── POST /api/auth/login ─────────────────────────────────────
-router.post('/login', [
-  body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
-  body('password').notEmpty().withMessage('Mot de passe requis'),
-], async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
-
+// --- POST /api/auth/login ---
+router.post('/login', async (req, res) => {
   const { email, password } = req.body;
   try {
     const user = await prisma.user.findUnique({
       where: { email },
-      include: {
-        structure: {
-          include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
-        },
-      },
+      include: { structure: true },
     });
 
-    if (!user || !['STRUCTURE', 'ADMIN'].includes(user.role)) {
+    if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
     }
-    if (!user.isActive) {
-      return res.status(401).json({ error: 'Compte désactivé. Contactez contactazamed@gmail.com' });
-    }
 
-    const ok = await bcrypt.compare(password, user.passwordHash);
-    if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
-
-    // ✅ Parser les modules depuis statutJuridique
+    // Extraction des modules depuis la description
     let parsedModules = {};
-    if (user.structure?.statutJuridique) {
-      try { parsedModules = JSON.parse(user.structure.statutJuridique); } catch {}
+    if (user.structure?.description?.startsWith('MODULES_DATA:')) {
+      try {
+        const parts = user.structure.description.split('|');
+        const jsonPart = parts[0].replace('MODULES_DATA:', '').trim();
+        parsedModules = JSON.parse(jsonPart);
+      } catch (e) {
+        console.error("Erreur parsing modules au login");
+      }
     }
 
     const token = generateToken(user.id);
     res.json({
       token,
       user: {
-        id:         user.id,
-        email:      user.email,
-        role:       user.role,
-        isVerified: user.isVerified,
-        // ✅ modules inclus directement dans structure
-        structure:  { ...user.structure, modules: parsedModules },
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        structure: { ...user.structure, modules: parsedModules },
       },
     });
   } catch (err) {
-    console.error('Login error:', err);
     res.status(500).json({ error: err.message });
   }
 });
