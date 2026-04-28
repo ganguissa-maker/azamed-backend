@@ -1,4 +1,4 @@
-// src/routes/auth.js — modules stockés dans le champ "horaires" (texte libre)
+// src/routes/auth.js — aligné sur le schema.prisma exact
 const express = require('express');
 const router  = express.Router();
 const bcrypt  = require('bcryptjs');
@@ -10,18 +10,12 @@ const prisma = new PrismaClient();
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
 
+// ✅ Types valides — correspondent exactement à l'enum TypeStructure du schema
 const TYPES_VALIDES = [
-  'PHARMACIE','LABORATOIRE','CENTRE_IMAGERIE','LABO_ET_IMAGERIE',
-  'HOPITAL_PUBLIC','POLYCLINIQUE','CLINIQUE',
-  'CABINET_MEDICAL','CABINET_SPECIALISE','CENTRE_SANTE',
+  'PHARMACIE', 'LABORATOIRE', 'HOPITAL_PUBLIC', 'HOPITAL_PRIVE',
+  'CLINIQUE', 'CABINET_MEDICAL', 'CABINET_SPECIALISE', 'CENTRE_SANTE',
+  'CENTRE_IMAGERIE', 'POLYCLINIQUE', 'LABO_ET_IMAGERIE', 'AUTRE',
 ];
-
-// ─── Ajouter colonne modules_json si elle n'existe pas ────────
-async function ensureModulesColumn() {
-  await prisma.$executeRawUnsafe(`
-    ALTER TABLE "Structure" ADD COLUMN IF NOT EXISTS "modulesJson" TEXT DEFAULT '{}'
-  `).catch(() => {});
-}
 
 // ─── POST /api/auth/register ──────────────────────────────────
 router.post('/register', [
@@ -39,6 +33,7 @@ router.post('/register', [
     telephone, whatsapp, adresse, pays, ville, quartier, description,
     horaire24h7j, joursOuverture, heureOuverture, heureFermeture,
     modules,
+    // Champs spécifiques
     numAutorisationPharm, nomPharmacien,
     numAgrement, nomBiologiste, nomMedecinRadiologue, nomPromoteur,
     numMinistere, categorieStruct, nomDirecteur,
@@ -73,20 +68,23 @@ router.post('/register', [
 
     const descriptionFull = [description, specifiques].filter(Boolean).join(' — ') || '';
 
-    // Horaires
-    let horairesFormatted = '';
+    // ✅ Horaires → stocker en JSON (schema: horaires Json?)
+    let horairesJson = null;
     if (horaire24h7j) {
-      horairesFormatted = '7j/7 24h/24';
-    } else if (Array.isArray(joursOuverture) && joursOuverture.length) {
-      horairesFormatted = `${joursOuverture.join(',')} ${heureOuverture || '08:00'}-${heureFermeture || '18:00'}`;
+      horairesJson = { mode: '24h/24 7j/7' };
     } else {
-      horairesFormatted = `${heureOuverture || '08:00'}-${heureFermeture || '18:00'}`;
+      const jours = Array.isArray(joursOuverture) ? joursOuverture : [];
+      horairesJson = {
+        jours,
+        ouverture: heureOuverture || '08:00',
+        fermeture: heureFermeture || '18:00',
+      };
     }
 
-    // Modules en JSON string
+    // ✅ Modules → stocker dans le champ description étendu OU via SQL brut
+    // On va utiliser une colonne séparée ajoutée via SQL
     const modulesStr = JSON.stringify(modules || {});
 
-    // Créer user + structure sans statutJuridique
     const user = await prisma.user.create({
       data: {
         email,
@@ -96,19 +94,24 @@ router.post('/register', [
         isActive:   true,
         structure: {
           create: {
+            // ✅ Champs du schema exact
+            nomLegal:       nomLegal       || nomCommercial,
             nomCommercial,
-            nomLegal:       nomLegal || null,
             typeStructure,
             telephone,
-            whatsapp:       whatsapp || null,
-            adresse:        adresse  || '',
-            pays:           pays     || 'Cameroun',
+            whatsapp:       whatsapp       || null,
+            // ✅ adresse est String (non-nullable dans schema) → jamais null
+            adresse:        adresse        || '',
+            pays:           pays           || 'Cameroun',
             ville,
-            quartier:       quartier || null,
-            description:    descriptionFull,
-            horaires:       horairesFormatted,
+            quartier:       quartier       || null,
+            description:    descriptionFull || null,
+            // ✅ horaires est Json? dans le schema
+            horaires:       horairesJson,
+            // ✅ heureOuverture et heureFermeture sont String? dans schema
             heureOuverture: horaire24h7j ? '00:00' : (heureOuverture || '08:00'),
             heureFermeture: horaire24h7j ? '23:59' : (heureFermeture || '18:00'),
+            // ✅ PAS de statutJuridique — c'est une enum, on ne l'utilise pas ici
             isVerified: false,
             isActive:   true,
             abonnements: {
@@ -124,18 +127,23 @@ router.post('/register', [
         },
       },
       include: {
-        structure: { include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } } },
+        structure: {
+          include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
+        },
       },
     });
 
-    // ✅ Sauvegarder modules via SQL brut dans une colonne texte
-    await ensureModulesColumn();
+    // ✅ Sauvegarder modules dans une colonne texte ajoutée via SQL brut
+    // (colonne modulesJson TEXT ajoutée si elle n'existe pas)
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "structures" ADD COLUMN IF NOT EXISTS "modules_json" TEXT DEFAULT '{}'
+    `).catch(() => {});
+
     await prisma.$executeRawUnsafe(
-      `UPDATE "Structure" SET "modulesJson" = $1 WHERE id = $2`,
+      `UPDATE "structures" SET "modules_json" = $1 WHERE id = $2`,
       modulesStr, user.structure.id
     ).catch(() => {});
 
-    // Parser modules pour la réponse
     let parsedModules = {};
     try { parsedModules = JSON.parse(modulesStr); } catch {}
 
@@ -171,7 +179,9 @@ router.post('/login', [
     const user = await prisma.user.findUnique({
       where: { email },
       include: {
-        structure: { include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } } },
+        structure: {
+          include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } },
+        },
       },
     });
 
@@ -185,16 +195,16 @@ router.post('/login', [
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
 
-    // ✅ Lire modules depuis la colonne texte modulesJson
+    // ✅ Lire modules depuis la colonne modules_json
     let parsedModules = {};
     if (user.structure?.id) {
       try {
         const rows = await prisma.$queryRawUnsafe(
-          `SELECT "modulesJson" FROM "Structure" WHERE id = $1`,
+          `SELECT "modules_json" FROM "structures" WHERE id = $1`,
           user.structure.id
         );
-        if (rows?.[0]?.modulesJson) {
-          parsedModules = JSON.parse(rows[0].modulesJson);
+        if (rows?.[0]?.modules_json) {
+          parsedModules = JSON.parse(rows[0].modules_json);
         }
       } catch {}
     }
