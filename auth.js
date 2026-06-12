@@ -172,7 +172,7 @@ router.post('/login', [
       return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
     }
     if (!user.isActive) {
-      return res.status(401).json({ error: 'Compte désactivé. Contactez contactazamed@gmail.com' });
+      return res.status(401).json({ error: 'Compte désactivé. Contactez contactazamed98@gmail.com' });
     }
 
     const ok = await bcrypt.compare(password, user.passwordHash);
