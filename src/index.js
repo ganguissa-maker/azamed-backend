@@ -53,6 +53,7 @@ const notificationsRoutes = require('./routes/notifications');
 const catalogueRoutes     = require('./routes/catalogue'); 
 const compareRoutes       = require('./routes/compare');// ✅ NOUVEAU
 const consultationsRoutes = require('./routes/consultations');
+const adminUsersRoutes = require('./routes/admin-users');
 
 app.use('/api/auth',          authRoutes);
 app.use('/api/users',         userRoutes);
@@ -70,6 +71,7 @@ app.use('/api/notifications', notificationsRoutes);
 app.use('/api/catalogue',     catalogueRoutes);
 app.use('/api/compare', compareRoutes);
 app.use('/api/consultations', consultationsRoutes);
+app.use('/api/admin/users', adminUsersRoutes);
  // ✅ NOUVEAU
 
 app.use('*', (req, res) => res.status(404).json({ error:`Route non trouvée : ${req.originalUrl}` }));
