@@ -1,4 +1,4 @@
-// src/routes/structures.js — Structures vérifiées visibles avec toutes leurs infos
+// src/routes/structures.js — Structures vérifiées + posts inclus
 const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
@@ -42,6 +42,7 @@ router.get('/me/profil', protect, structureOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ── GET /:id — fiche détail avec posts inclus ──────────────────
 router.get('/:id', async (req, res) => {
   try {
     const structure = await prisma.structure.findFirst({
@@ -51,6 +52,11 @@ router.get('/:id', async (req, res) => {
         pharmacieMedicaments: { where: { enStock: true }, include: { medicament: true }, orderBy: { medicament: { nomCommercial: 'asc' } } },
         laboExamens:          { where: { disponible: true }, include: { examen: true }, orderBy: { examen: { nom: 'asc' } } },
         hopitalServices:      { where: { disponible: true }, include: { service: true }, orderBy: { service: { nom: 'asc' } } },
+        // ✅ AJOUT : publications de la structure (approuvées et actives)
+        posts: {
+          where: { isApproved: true, isActive: true },
+          orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
+        },
       },
     });
     if (!structure) return res.status(404).json({ error: 'Structure introuvable ou non vérifiée.' });
