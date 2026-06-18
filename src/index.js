@@ -54,6 +54,8 @@ const catalogueRoutes     = require('./routes/catalogue');
 const compareRoutes       = require('./routes/compare');// ✅ NOUVEAU
 const consultationsRoutes = require('./routes/consultations');
 const adminUsersRoutes = require('./routes/admin-users');
+const path = require('path');
+
 
 app.use('/api/auth',          authRoutes);
 app.use('/api/users',         userRoutes);
@@ -72,6 +74,7 @@ app.use('/api/catalogue',     catalogueRoutes);
 app.use('/api/compare', compareRoutes);
 app.use('/api/consultations', consultationsRoutes);
 app.use('/api/admin/users', adminUsersRoutes);
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
  // ✅ NOUVEAU
 
 app.use('*', (req, res) => res.status(404).json({ error:`Route non trouvée : ${req.originalUrl}` }));

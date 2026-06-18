@@ -1,4 +1,4 @@
-// src/routes/pharmacies.js
+// src/routes/pharmacies.js — UNIQUEMENT pharmacies
 const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
@@ -10,20 +10,20 @@ router.get('/garde', async (req, res) => {
   try {
     const { ville } = req.query;
     const where = { typeStructure:'PHARMACIE', isVerified:true, isActive:true, estDeGarde:true };
-    if (ville) where.ville = { contains: ville, mode:'insensitive' };
-    const data = await prisma.structure.findMany({ where, orderBy:{ nomCommercial:'asc' } });
+    if (ville) where.ville = { contains:ville, mode:'insensitive' };
+    const data = await prisma.structure.findMany({ where, orderBy:{ nomCommercial:'asc' },
+      include:{ abonnements:{ orderBy:{ createdAt:'desc' }, take:1 } } });
     res.json({ data });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
 
-// GET /api/pharmacies — liste publique pharmacies vérifiées
+// GET /api/pharmacies — UNIQUEMENT PHARMACIE
 router.get('/', async (req, res) => {
   try {
-    const { search, ville, garde, page=1, limit=15 } = req.query;
+    const { search, ville, page=1, limit=30 } = req.query;
     const skip = (parseInt(page)-1)*parseInt(limit);
     const where = { typeStructure:'PHARMACIE', isVerified:true, isActive:true };
     if (ville)  where.ville = { contains:ville, mode:'insensitive' };
-    if (garde === 'true') where.estDeGarde = true;
     if (search) where.OR = [
       { nomCommercial:{ contains:search, mode:'insensitive' } },
       { ville:        { contains:search, mode:'insensitive' } },
@@ -42,8 +42,7 @@ router.get('/', async (req, res) => {
 router.get('/:id/medicaments', async (req, res) => {
   try {
     const data = await prisma.pharmacieMedicament.findMany({
-      where:{ pharmacieId:req.params.id },
-      include:{ medicament:true },
+      where:{ pharmacieId:req.params.id }, include:{ medicament:true },
       orderBy:{ medicament:{ nomCommercial:'asc' } },
     });
     res.json({ data });
@@ -94,7 +93,7 @@ router.delete('/:id/medicaments/:itemId', protect, structureOnly, async (req, re
 // PUT /api/pharmacies/:id/garde
 router.put('/:id/garde', protect, structureOnly, async (req, res) => {
   try {
-    const s = await prisma.structure.update({ where:{ id:req.params.id }, data:{ estDeGarde:req.body.estDeGarde ?? false } });
+    const s = await prisma.structure.update({ where:{ id:req.params.id }, data:{ estDeGarde:req.body.estDeGarde??false } });
     res.json(s);
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
