@@ -1,9 +1,21 @@
-// src/routes/consultations.js — Double validation + prix médecin + quartier patient
+// src/routes/consultations.js — Prix FIXES selon type+lieu (médecin ne fixe que date/heure)
 const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { protect } = require('../middleware/auth');
 const prisma = new PrismaClient();
+
+// ✅ GRILLE TARIFAIRE FIXE — le médecin ne peut pas la modifier
+const TARIFS = {
+  GENERALISTE: { CABINET: 5000,  DOMICILE: 10000 },
+  SPECIALISTE: { CABINET: 15000, DOMICILE: 20000 },
+};
+
+function calculerPrix(typeConsultation, lieu) {
+  const grille = TARIFS[typeConsultation];
+  if (!grille) return null;
+  return grille[lieu] ?? null;
+}
 
 async function ensureTables() {
   await prisma.$executeRawUnsafe(`
@@ -26,8 +38,6 @@ async function ensureTables() {
       CONSTRAINT "consultations_pkey" PRIMARY KEY ("id")
     )
   `).catch(() => {});
-
-  // Ajouter colonnes manquantes si table existe déjà
   await prisma.$executeRawUnsafe(`ALTER TABLE "consultations" ADD COLUMN IF NOT EXISTS "quartierPatient" TEXT`).catch(() => {});
   await prisma.$executeRawUnsafe(`ALTER TABLE "consultations" ADD COLUMN IF NOT EXISTS "prix" DECIMAL`).catch(() => {});
 
@@ -45,6 +55,9 @@ async function ensureTables() {
     )
   `).catch(() => {});
 }
+
+// ── GET /api/consultations/tarifs — grille publique ───────────
+router.get('/tarifs', (req, res) => res.json({ tarifs: TARIFS }));
 
 // ── POST /api/consultations — Patient demande ─────────────────
 router.post('/', protect, async (req, res) => {
@@ -65,7 +78,6 @@ router.post('/', protect, async (req, res) => {
     );
     const consultation = rows[0];
 
-    // Infos patient
     const patient = await prisma.user.findUnique({ where:{ id:req.user.id }, select:{ email:true } });
     let profil = {};
     try {
@@ -76,7 +88,6 @@ router.post('/', protect, async (req, res) => {
     const patientNom = profil.prenom ? `${profil.prenom} ${profil.nom || ''}`.trim() : patient.email;
     const typeLabel  = typeConsultation === 'GENERALISTE' ? 'Médecine générale' : `Spécialiste${specialite ? ` (${specialite})` : ''}`;
 
-    // Notifier TOUS les médecins
     const medecins = await prisma.user.findMany({ where:{ role:'MEDECIN', isActive:true }, select:{ id:true } });
     for (const med of medecins) {
       await prisma.$executeRawUnsafe(
@@ -87,7 +98,7 @@ router.post('/', protect, async (req, res) => {
       ).catch(() => {});
     }
 
-    res.status(201).json({ message:'Demande envoyée. Les médecins ont été notifiés.', consultation });
+    res.status(201).json({ message:'Demande envoyée. Les médecins ont été notifiés.', consultation, tarifs: TARIFS[typeConsultation] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });
@@ -100,7 +111,6 @@ router.get('/mes', protect, async (req, res) => {
     await ensureTables();
     let rows;
     if (req.user.role === 'MEDECIN') {
-      // Médecin : toutes EN_ATTENTE + ses consultations acceptées/terminées
       rows = await prisma.$queryRawUnsafe(
         `SELECT c.*,
            pu.prenom as "patientPrenom", pu.nom as "patientNom",
@@ -112,8 +122,16 @@ router.get('/mes', protect, async (req, res) => {
          ORDER BY c."createdAt" DESC LIMIT 50`,
         req.user.id
       );
+      // ✅ Le téléphone patient n'est visible QUE si statut = ACCEPTEE (validé par le patient)
+      rows = rows.map((r) => {
+        if (r.statut !== 'ACCEPTEE') {
+          const { patientTel, ...rest } = r;
+          return rest;
+        }
+        return r;
+      });
     } else {
-      // Patient : ses consultations — ❌ NE PAS retourner le téléphone du médecin
+      // Patient : jamais le téléphone du médecin
       rows = await prisma.$queryRawUnsafe(
         `SELECT c.*,
            pm.prenom as "medecinPrenom", pm.nom as "medecinNom",
@@ -132,13 +150,13 @@ router.get('/mes', protect, async (req, res) => {
 });
 
 // ── PUT /api/consultations/:id/accepter — Médecin propose ─────
-// Statut → PROPOSEE (en attente de validation patient)
+// ✅ Le médecin choisit UNIQUEMENT lieu + date + heure. Le prix est calculé automatiquement.
 router.put('/:id/accepter', protect, async (req, res) => {
   try {
     await ensureTables();
     if (req.user.role !== 'MEDECIN') return res.status(403).json({ error:'Réservé aux médecins.' });
 
-    const { lieu, dateProposee, heureProposee, prix } = req.body;
+    const { lieu, dateProposee, heureProposee } = req.body;
     if (!['DOMICILE','CABINET'].includes(lieu)) {
       return res.status(400).json({ error:'Lieu invalide. Choisissez DOMICILE ou CABINET.' });
     }
@@ -149,17 +167,20 @@ router.put('/:id/accepter', protect, async (req, res) => {
       return res.status(400).json({ error:'Cette consultation a déjà été prise en charge.' });
     }
 
-    // Statut → PROPOSEE (médecin a proposé, patient doit valider)
+    // ✅ Calcul automatique du prix selon la grille fixe
+    const prix = calculerPrix(existing[0].typeConsultation, lieu);
+    if (prix === null) {
+      return res.status(400).json({ error:'Impossible de calculer le tarif pour ce type de consultation.' });
+    }
+
     await prisma.$executeRawUnsafe(
       `UPDATE "consultations" SET
         "medecinId"=$1, "statut"='PROPOSEE', "lieu"=$2,
         "dateProposee"=$3, "heureProposee"=$4, "prix"=$5, "updatedAt"=NOW()
        WHERE "id"=$6`,
-      req.user.id, lieu, dateProposee || null, heureProposee || null,
-      prix ? parseFloat(prix) : null, req.params.id
+      req.user.id, lieu, dateProposee || null, heureProposee || null, prix, req.params.id
     );
 
-    // Infos médecin
     let profilMed = {};
     try {
       const pm = await prisma.$queryRawUnsafe(`SELECT * FROM "profils_utilisateurs" WHERE "userId"=$1`, req.user.id);
@@ -169,24 +190,23 @@ router.put('/:id/accepter', protect, async (req, res) => {
     const medecinNom = profilMed.prenom ? `Dr. ${profilMed.prenom} ${profilMed.nom || ''}`.trim() : 'Un médecin';
     const lieuTxt    = lieu === 'DOMICILE' ? 'à votre domicile' : 'dans son cabinet';
     const dateTxt    = dateProposee ? ` le ${dateProposee}${heureProposee ? ` à ${heureProposee}` : ''}` : '';
-    const prixTxt    = prix ? ` — Tarif : ${Number(prix).toLocaleString()} FCFA` : '';
 
-    // Notifier le patient — avec bouton pour valider
     await prisma.$executeRawUnsafe(
       `INSERT INTO "notifications_consult" ("userId","type","titre","message","data") VALUES ($1,$2,$3,$4,$5)`,
       existing[0].patientId, 'CONSULTATION_PROPOSEE',
       '⏳ Consultation proposée — Votre validation requise',
-      `${medecinNom} propose une consultation ${lieuTxt}${dateTxt}${prixTxt}. Veuillez valider ou refuser cette proposition.`,
+      `${medecinNom} propose une consultation ${lieuTxt}${dateTxt} — Tarif : ${prix.toLocaleString()} FCFA. Veuillez valider ou refuser.`,
       JSON.stringify({ consultationId: req.params.id, medecinId: req.user.id, lieu, dateProposee, heureProposee, prix })
     ).catch(() => {});
 
-    res.json({ message:'Proposition envoyée. En attente de validation du patient.' });
+    res.json({ message:'Proposition envoyée. En attente de validation du patient.', prix });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ── PUT /api/consultations/:id/valider — Patient valide ───────
+// ✅ Le téléphone du patient devient visible pour le médecin SEULEMENT après cette validation
 router.put('/:id/valider', protect, async (req, res) => {
   try {
     await ensureTables();
@@ -197,12 +217,12 @@ router.put('/:id/valider', protect, async (req, res) => {
     if (existing[0].patientId !== req.user.id) return res.status(403).json({ error:'Non autorisé.' });
     if (existing[0].statut !== 'PROPOSEE') return res.status(400).json({ error:'Aucune proposition à valider.' });
 
+    // ✅ Passage à ACCEPTEE = déclenche la visibilité du téléphone patient pour le médecin
     await prisma.$executeRawUnsafe(
       `UPDATE "consultations" SET "statut"='ACCEPTEE', "updatedAt"=NOW() WHERE "id"=$1`,
       req.params.id
     );
 
-    // Infos patient pour notifier le médecin
     let profilPat = {};
     try {
       const pp = await prisma.$queryRawUnsafe(`SELECT * FROM "profils_utilisateurs" WHERE "userId"=$1`, req.user.id);
@@ -211,7 +231,6 @@ router.put('/:id/valider', protect, async (req, res) => {
     const patientNom = profilPat.prenom ? `${profilPat.prenom} ${profilPat.nom || ''}`.trim() : 'Le patient';
     const patientTel = profilPat.telephone || '';
 
-    // Notifier le médecin — avec numéro du patient
     await prisma.$executeRawUnsafe(
       `INSERT INTO "notifications_consult" ("userId","type","titre","message","data") VALUES ($1,$2,$3,$4,$5)`,
       existing[0].medecinId, 'CONSULTATION_VALIDEE',
@@ -220,7 +239,7 @@ router.put('/:id/valider', protect, async (req, res) => {
       JSON.stringify({ consultationId: req.params.id, patientTel, quartierPatient: existing[0].quartierPatient })
     ).catch(() => {});
 
-    res.json({ message:'Consultation validée ! Le médecin a été notifié.' });
+    res.json({ message:'Consultation validée ! Le médecin a été notifié et peut maintenant vous contacter.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -234,7 +253,6 @@ router.put('/:id/refuser-patient', protect, async (req, res) => {
     if (!existing[0]) return res.status(404).json({ error:'Consultation introuvable.' });
     if (existing[0].patientId !== req.user.id) return res.status(403).json({ error:'Non autorisé.' });
 
-    // Remettre EN_ATTENTE pour que d'autres médecins puissent accepter
     await prisma.$executeRawUnsafe(
       `UPDATE "consultations" SET "statut"='EN_ATTENTE', "medecinId"=NULL, "lieu"=NULL,
         "dateProposee"=NULL, "heureProposee"=NULL, "prix"=NULL, "updatedAt"=NOW()
@@ -242,7 +260,6 @@ router.put('/:id/refuser-patient', protect, async (req, res) => {
       req.params.id
     );
 
-    // Notifier le médecin du refus
     if (existing[0].medecinId) {
       await prisma.$executeRawUnsafe(
         `INSERT INTO "notifications_consult" ("userId","type","titre","message","data") VALUES ($1,$2,$3,$4,$5)`,
@@ -301,7 +318,6 @@ router.get('/notifications', protect, async (req, res) => {
   }
 });
 
-// ── PUT /api/consultations/notifications/:id/lire ─────────────
 router.put('/notifications/:id/lire', protect, async (req, res) => {
   try {
     await prisma.$executeRawUnsafe(
