@@ -29,6 +29,8 @@ async function ensureTables() {
       "lieu"            TEXT,
       "quartierPatient" TEXT,
       "adressePatient"  TEXT,
+      "nomCabinet"      TEXT,
+      "quartierCabinet" TEXT,
       "prix"            DECIMAL,
       "statut"          TEXT NOT NULL DEFAULT 'EN_ATTENTE',
       "dateProposee"    TEXT,
@@ -40,6 +42,8 @@ async function ensureTables() {
   `).catch(() => {});
   await prisma.$executeRawUnsafe(`ALTER TABLE "consultations" ADD COLUMN IF NOT EXISTS "quartierPatient" TEXT`).catch(() => {});
   await prisma.$executeRawUnsafe(`ALTER TABLE "consultations" ADD COLUMN IF NOT EXISTS "prix" DECIMAL`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "consultations" ADD COLUMN IF NOT EXISTS "nomCabinet" TEXT`).catch(() => {});
+  await prisma.$executeRawUnsafe(`ALTER TABLE "consultations" ADD COLUMN IF NOT EXISTS "quartierCabinet" TEXT`).catch(() => {});
 
   await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "notifications_consult" (
@@ -156,9 +160,18 @@ router.put('/:id/accepter', protect, async (req, res) => {
     await ensureTables();
     if (req.user.role !== 'MEDECIN') return res.status(403).json({ error:'Réservé aux médecins.' });
 
-    const { lieu, dateProposee, heureProposee } = req.body;
+    const { lieu, dateProposee, heureProposee, nomCabinet, quartierCabinet } = req.body;
     if (!['DOMICILE','CABINET'].includes(lieu)) {
       return res.status(400).json({ error:'Lieu invalide. Choisissez DOMICILE ou CABINET.' });
+    }
+    // ✅ Si consultation au cabinet, le médecin doit indiquer le nom de la structure et le quartier
+    if (lieu === 'CABINET') {
+      if (!nomCabinet || !nomCabinet.trim()) {
+        return res.status(400).json({ error:'Indiquez le nom de la structure sanitaire (cabinet).' });
+      }
+      if (!quartierCabinet || !quartierCabinet.trim()) {
+        return res.status(400).json({ error:'Indiquez le quartier où se trouve le cabinet.' });
+      }
     }
 
     const existing = await prisma.$queryRawUnsafe(`SELECT * FROM "consultations" WHERE "id"=$1`, req.params.id);
@@ -176,9 +189,13 @@ router.put('/:id/accepter', protect, async (req, res) => {
     await prisma.$executeRawUnsafe(
       `UPDATE "consultations" SET
         "medecinId"=$1, "statut"='PROPOSEE', "lieu"=$2,
-        "dateProposee"=$3, "heureProposee"=$4, "prix"=$5, "updatedAt"=NOW()
-       WHERE "id"=$6`,
-      req.user.id, lieu, dateProposee || null, heureProposee || null, prix, req.params.id
+        "dateProposee"=$3, "heureProposee"=$4, "prix"=$5,
+        "nomCabinet"=$6, "quartierCabinet"=$7, "updatedAt"=NOW()
+       WHERE "id"=$8`,
+      req.user.id, lieu, dateProposee || null, heureProposee || null, prix,
+      lieu === 'CABINET' ? nomCabinet.trim() : null,
+      lieu === 'CABINET' ? quartierCabinet.trim() : null,
+      req.params.id
     );
 
     let profilMed = {};
@@ -188,7 +205,9 @@ router.put('/:id/accepter', protect, async (req, res) => {
     } catch {}
 
     const medecinNom = profilMed.prenom ? `Dr. ${profilMed.prenom} ${profilMed.nom || ''}`.trim() : 'Un médecin';
-    const lieuTxt    = lieu === 'DOMICILE' ? 'à votre domicile' : 'dans son cabinet';
+    const lieuTxt    = lieu === 'DOMICILE'
+      ? 'à votre domicile'
+      : `dans son cabinet — ${nomCabinet.trim()} (${quartierCabinet.trim()})`;
     const dateTxt    = dateProposee ? ` le ${dateProposee}${heureProposee ? ` à ${heureProposee}` : ''}` : '';
 
     await prisma.$executeRawUnsafe(
@@ -196,7 +215,7 @@ router.put('/:id/accepter', protect, async (req, res) => {
       existing[0].patientId, 'CONSULTATION_PROPOSEE',
       '⏳ Consultation proposée — Votre validation requise',
       `${medecinNom} propose une consultation ${lieuTxt}${dateTxt} — Tarif : ${prix.toLocaleString()} FCFA. Veuillez valider ou refuser.`,
-      JSON.stringify({ consultationId: req.params.id, medecinId: req.user.id, lieu, dateProposee, heureProposee, prix })
+      JSON.stringify({ consultationId: req.params.id, medecinId: req.user.id, lieu, dateProposee, heureProposee, prix, nomCabinet, quartierCabinet })
     ).catch(() => {});
 
     res.json({ message:'Proposition envoyée. En attente de validation du patient.', prix });
@@ -255,7 +274,8 @@ router.put('/:id/refuser-patient', protect, async (req, res) => {
 
     await prisma.$executeRawUnsafe(
       `UPDATE "consultations" SET "statut"='EN_ATTENTE', "medecinId"=NULL, "lieu"=NULL,
-        "dateProposee"=NULL, "heureProposee"=NULL, "prix"=NULL, "updatedAt"=NOW()
+        "dateProposee"=NULL, "heureProposee"=NULL, "prix"=NULL,
+        "nomCabinet"=NULL, "quartierCabinet"=NULL, "updatedAt"=NOW()
        WHERE "id"=$1`,
       req.params.id
     );
