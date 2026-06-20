@@ -251,4 +251,24 @@ router.get('/medecins', async (req, res) => {
   }
 });
 
+router.get('/me', protect, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user.id },
+      select: { id:true, email:true, role:true, isVerified:true, isActive:true },
+    });
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+
+    let profil = {};
+    try {
+      const rows = await prisma.$queryRawUnsafe(`SELECT * FROM "profils_utilisateurs" WHERE "userId"=$1`, user.id);
+      if (rows?.[0]) profil = rows[0];
+    } catch {}
+
+    res.json({ user: { ...user, profil } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
