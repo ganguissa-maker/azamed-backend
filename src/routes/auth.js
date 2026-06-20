@@ -1,4 +1,4 @@
-// src/routes/auth.js — aligné sur le schema.prisma exact
+// src/routes/auth.js — aligné sur le schema.prisma exact + vérification email
 const express = require('express');
 const router  = express.Router();
 const bcrypt  = require('bcryptjs');
@@ -17,7 +17,83 @@ const TYPES_VALIDES = [
   'CENTRE_IMAGERIE', 'POLYCLINIQUE', 'LABO_ET_IMAGERIE', 'AUTRE',
 ];
 
-// ─── POST /api/auth/register ──────────────────────────────────
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function ensureTables() {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "email_verifications" (
+      "id"        TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "email"     TEXT NOT NULL,
+      "code"      TEXT NOT NULL,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "used"      BOOLEAN NOT NULL DEFAULT false,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "email_verifications_pkey" PRIMARY KEY ("id")
+    )
+  `).catch(() => {});
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "password_resets" (
+      "id"        TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "email"     TEXT NOT NULL,
+      "code"      TEXT NOT NULL,
+      "expiresAt" TIMESTAMP(3) NOT NULL,
+      "used"      BOOLEAN NOT NULL DEFAULT false,
+      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "password_resets_pkey" PRIMARY KEY ("id")
+    )
+  `).catch(() => {});
+
+  // ✅ Inscriptions structures en attente de vérification email
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "inscriptions_structures_attente" (
+      "id"           TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "email"        TEXT NOT NULL UNIQUE,
+      "passwordHash" TEXT NOT NULL,
+      "donnees"      TEXT NOT NULL,
+      "createdAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "inscriptions_structures_attente_pkey" PRIMARY KEY ("id")
+    )
+  `).catch(() => {});
+}
+
+async function sendEmail(to, subject, html, fallbackLogLabel) {
+  try {
+    const nodemailer = require('nodemailer');
+    const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+    const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+    if (!smtpUser || !smtpPass) {
+      console.log(`📋 [${fallbackLogLabel}] (pas de SMTP configuré) → ${to}`);
+      return;
+    }
+    const transporter = nodemailer.createTransport({ service:'gmail', auth:{ user:smtpUser, pass:smtpPass } });
+    await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
+    console.log(`✅ Email envoyé à ${to} — ${subject}`);
+  } catch (e) {
+    console.log(`📋 [${fallbackLogLabel}] Erreur envoi email: ${e.message}`);
+  }
+}
+
+function emailTemplateCode(titre, code, sousTexte) {
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px">
+      <h2 style="color:#0284c7">AZAMED 🇨🇲</h2>
+      <p>${titre}</p>
+      <div style="background:#f0f9ff;border-radius:12px;padding:20px;text-align:center;margin:20px 0">
+        <p style="margin:0;font-size:14px;color:#64748b">${sousTexte}</p>
+        <p style="font-size:36px;font-weight:900;color:#0284c7;letter-spacing:8px;margin:8px 0">${code}</p>
+        <p style="margin:0;font-size:12px;color:#94a3b8">Valide pendant 15 minutes</p>
+      </div>
+      <p style="color:#64748b;font-size:13px">Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.</p>
+      <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0"/>
+      <p style="color:#94a3b8;font-size:12px">AZAMED — Annuaire Santé Cameroun</p>
+    </div>
+  `;
+}
+
+// ─── POST /api/auth/register — Étape 1 : envoie le code, ne crée pas encore le compte ──
 router.post('/register', [
   body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
   body('password').isLength({ min: 6 }).withMessage('Mot de passe : min. 6 caractères'),
@@ -28,27 +104,92 @@ router.post('/register', [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array(), error: errors.array()[0].msg });
 
-  const {
-    email, password, typeStructure, nomLegal,
-    telephone, whatsapp, adresse, pays, ville, quartier, description,
-    horaire24h7j, joursOuverture, heureOuverture, heureFermeture,
-    modules,
-    // Champs spécifiques
-    numAutorisationPharm, nomPharmacien,
-    numAgrement, nomBiologiste, nomMedecinRadiologue, nomPromoteur,
-    numMinistere, categorieStruct, nomDirecteur,
-    numAutorisationOuverture, nomMedecinChef, nomMedecin,
-    numOrdre, nomResponsable,
-  } = req.body;
+  const { email, password } = req.body;
 
   try {
+    await ensureTables();
+
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
 
-    const passwordHash  = await bcrypt.hash(password, 12);
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // ✅ On stocke TOUT le body (moins password) tel quel, réutilisé intégralement
+    // à l'étape verify-email pour créer la structure exactement comme avant.
+    const { password: _omit, ...donneesFormulaire } = req.body;
+    const donneesStr = JSON.stringify(donneesFormulaire);
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "inscriptions_structures_attente" ("email","passwordHash","donnees")
+       VALUES ($1,$2,$3)
+       ON CONFLICT ("email") DO UPDATE SET "passwordHash"=$2,"donnees"=$3,"createdAt"=NOW()`,
+      email, passwordHash, donneesStr
+    );
+
+    const code      = generateCode();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "email"=$1`, email).catch(() => {});
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "email_verifications" ("email","code","expiresAt") VALUES ($1,$2,$3)`,
+      email, code, expiresAt
+    );
+
+    await sendEmail(
+      email,
+      '📧 Vérifiez votre email — AZAMED',
+      emailTemplateCode('Confirmez votre adresse email pour activer votre compte établissement AZAMED.', code, 'Votre code de vérification'),
+      'CODE INSCRIPTION STRUCTURE'
+    );
+
+    res.status(200).json({ message: 'Un code de vérification a été envoyé à votre email.', email });
+  } catch (err) {
+    console.error('Register error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/auth/verify-email — Étape 2 : valide le code et crée la structure ──
+router.post('/verify-email', async (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ error: 'Email et code requis.' });
+
+  try {
+    await ensureTables();
+
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT * FROM "email_verifications"
+       WHERE "email"=$1 AND "code"=$2 AND "used"=false AND "expiresAt" > NOW()
+       ORDER BY "createdAt" DESC LIMIT 1`,
+      email.toLowerCase(), code.trim()
+    );
+    if (!rows || rows.length === 0) {
+      return res.status(400).json({ error: 'Code invalide ou expiré. Demandez un nouveau code.' });
+    }
+
+    const pendingRows = await prisma.$queryRawUnsafe(
+      `SELECT * FROM "inscriptions_structures_attente" WHERE "email"=$1`, email.toLowerCase()
+    );
+    if (!pendingRows || pendingRows.length === 0) {
+      return res.status(400).json({ error: 'Inscription introuvable. Recommencez le processus.' });
+    }
+    const pending = pendingRows[0];
+    const passwordHash = pending.passwordHash;
+    const body = JSON.parse(pending.donnees);
+
+    const {
+      typeStructure, nomLegal,
+      telephone, whatsapp, adresse, pays, ville, quartier, description,
+      horaire24h7j, joursOuverture, heureOuverture, heureFermeture,
+      modules,
+      numAutorisationPharm, nomPharmacien,
+      numAgrement, nomBiologiste, nomMedecinRadiologue, nomPromoteur,
+      numMinistere, categorieStruct, nomDirecteur,
+      numAutorisationOuverture, nomMedecinChef, nomMedecin,
+      numOrdre, nomResponsable,
+    } = body;
+
     const nomCommercial = nomLegal || `${typeStructure} ${ville}`;
 
-    // Description enrichie avec champs spécifiques
     const specifiques = [
       numAutorisationPharm     && `N° Autorisation: ${numAutorisationPharm}`,
       nomPharmacien            && `Pharmacien: ${nomPharmacien}`,
@@ -68,7 +209,6 @@ router.post('/register', [
 
     const descriptionFull = [description, specifiques].filter(Boolean).join(' — ') || '';
 
-    // ✅ Horaires → stocker en JSON (schema: horaires Json?)
     let horairesJson = null;
     if (horaire24h7j) {
       horairesJson = { mode: '24h/24 7j/7' };
@@ -81,37 +221,30 @@ router.post('/register', [
       };
     }
 
-    // ✅ Modules → stocker dans le champ description étendu OU via SQL brut
-    // On va utiliser une colonne séparée ajoutée via SQL
     const modulesStr = JSON.stringify(modules || {});
 
     const user = await prisma.user.create({
       data: {
-        email,
+        email: email.toLowerCase(),
         passwordHash,
         role:       'STRUCTURE',
         isVerified: false,
         isActive:   true,
         structure: {
           create: {
-            // ✅ Champs du schema exact
             nomLegal:       nomLegal       || nomCommercial,
             nomCommercial,
             typeStructure,
             telephone,
             whatsapp:       whatsapp       || null,
-            // ✅ adresse est String (non-nullable dans schema) → jamais null
             adresse:        adresse        || '',
             pays:           pays           || 'Cameroun',
             ville,
             quartier:       quartier       || null,
             description:    descriptionFull || null,
-            // ✅ horaires est Json? dans le schema
             horaires:       horairesJson,
-            // ✅ heureOuverture et heureFermeture sont String? dans schema
             heureOuverture: horaire24h7j ? '00:00' : (heureOuverture || '08:00'),
             heureFermeture: horaire24h7j ? '23:59' : (heureFermeture || '18:00'),
-            // ✅ PAS de statutJuridique — c'est une enum, on ne l'utilise pas ici
             isVerified: false,
             isActive:   true,
             abonnements: {
@@ -133,8 +266,6 @@ router.post('/register', [
       },
     });
 
-    // ✅ Sauvegarder modules dans une colonne texte ajoutée via SQL brut
-    // (colonne modulesJson TEXT ajoutée si elle n'existe pas)
     await prisma.$executeRawUnsafe(`
       ALTER TABLE "structures" ADD COLUMN IF NOT EXISTS "modules_json" TEXT DEFAULT '{}'
     `).catch(() => {});
@@ -147,9 +278,12 @@ router.post('/register', [
     let parsedModules = {};
     try { parsedModules = JSON.parse(modulesStr); } catch {}
 
+    await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "id"=$1`, rows[0].id);
+    await prisma.$executeRawUnsafe(`DELETE FROM "inscriptions_structures_attente" WHERE "email"=$1`, email.toLowerCase());
+
     const token = generateToken(user.id);
     res.status(201).json({
-      message: 'Compte créé avec succès !',
+      message: 'Compte créé et vérifié avec succès !',
       token,
       user: {
         id:         user.id,
@@ -160,13 +294,48 @@ router.post('/register', [
       },
     });
   } catch (err) {
-    console.error('Register error:', err);
+    console.error('Verify-email structure error:', err);
     if (err.code === 'P2002') return res.status(400).json({ error: 'Email déjà utilisé.' });
     res.status(500).json({ error: err.message });
   }
 });
 
-// ─── POST /api/auth/login ─────────────────────────────────────
+// ─── POST /api/auth/resend-code ────────────────────────────────
+router.post('/resend-code', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email requis.' });
+
+  try {
+    await ensureTables();
+    const pending = await prisma.$queryRawUnsafe(
+      `SELECT * FROM "inscriptions_structures_attente" WHERE "email"=$1`, email.toLowerCase()
+    );
+    if (!pending || pending.length === 0) {
+      return res.status(400).json({ error: 'Aucune inscription en attente pour cet email.' });
+    }
+
+    const code      = generateCode();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "email"=$1`, email.toLowerCase()).catch(() => {});
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "email_verifications" ("email","code","expiresAt") VALUES ($1,$2,$3)`,
+      email.toLowerCase(), code, expiresAt
+    );
+
+    await sendEmail(
+      email,
+      '📧 Nouveau code de vérification — AZAMED',
+      emailTemplateCode('Voici votre nouveau code de vérification.', code, 'Votre code de vérification'),
+      'CODE RENVOYÉ STRUCTURE'
+    );
+
+    res.json({ message: 'Nouveau code envoyé.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/auth/login ───────────────────────────────────────
 router.post('/login', [
   body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
   body('password').notEmpty().withMessage('Mot de passe requis'),
@@ -195,7 +364,6 @@ router.post('/login', [
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
 
-    // ✅ Lire modules depuis la colonne modules_json
     let parsedModules = {};
     if (user.structure?.id) {
       try {
@@ -222,6 +390,70 @@ router.post('/login', [
     });
   } catch (err) {
     console.error('Login error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/auth/forgot-password ────────────────────────────
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email requis.' });
+
+  try {
+    await ensureTables();
+    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+    if (!user) return res.json({ message: 'Si cet email existe, un code vous a été envoyé.' });
+
+    const code      = generateCode();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await prisma.$executeRawUnsafe(`UPDATE "password_resets" SET "used"=true WHERE "email"=$1`, email.toLowerCase()).catch(() => {});
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "password_resets" ("email","code","expiresAt") VALUES ($1,$2,$3)`,
+      email.toLowerCase(), code, expiresAt
+    );
+
+    await sendEmail(
+      email,
+      '🔐 Code de réinitialisation — AZAMED',
+      emailTemplateCode('Vous avez demandé la réinitialisation de votre mot de passe établissement.', code, 'Votre code de réinitialisation'),
+      'CODE RESET STRUCTURE'
+    );
+
+    res.json({ message: 'Si cet email existe, un code vous a été envoyé.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/auth/reset-password ──────────────────────────────
+router.post('/reset-password', async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ error: 'Email, code et nouveau mot de passe requis.' });
+  }
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
+  }
+
+  try {
+    await ensureTables();
+    const rows = await prisma.$queryRawUnsafe(
+      `SELECT * FROM "password_resets"
+       WHERE "email"=$1 AND "code"=$2 AND "used"=false AND "expiresAt" > NOW()
+       ORDER BY "createdAt" DESC LIMIT 1`,
+      email.toLowerCase(), code.trim()
+    );
+    if (!rows || rows.length === 0) {
+      return res.status(400).json({ error: 'Code invalide ou expiré. Demandez un nouveau code.' });
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+    await prisma.user.update({ where: { email: email.toLowerCase() }, data: { passwordHash } });
+    await prisma.$executeRawUnsafe(`UPDATE "password_resets" SET "used"=true WHERE "id"=$1`, rows[0].id);
+
+    res.json({ message: 'Mot de passe réinitialisé avec succès.' });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
