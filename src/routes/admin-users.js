@@ -1,4 +1,4 @@
-// src/routes/admin-users.js — Gestion utilisateurs depuis l'admin
+// src/routes/admin-users.js — Patients + Médecins (web et mobile = même table users)
 const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
@@ -20,34 +20,32 @@ async function ensureProfilTable() {
   `).catch(() => {});
 }
 
-// ── GET /api/admin/users — liste paginée ──────────────────────
+// ── GET /api/admin/users — liste paginée (PATIENT + MEDECIN, peu importe l'origine) ──
 router.get('/', async (req, res) => {
   try {
     await ensureProfilTable();
     const { search, role, isVerified, page = 1, limit = 20 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
+    // ✅ Note : la table "users" est UNIQUE et partagée entre le site public
+    // et l'application mobile — il n'existe pas de distinction "origine".
+    // Un compte créé sur mobile ou sur le web apparaît donc automatiquement ici.
     const where = {
       role: role ? role : { in: ['PATIENT', 'MEDECIN'] },
     };
     if (isVerified === 'true')  where.isVerified = true;
     if (isVerified === 'false') where.isVerified = false;
 
-    // Récupérer les users
-    let users = await prisma.user.findMany({
+    const users = await prisma.user.findMany({
       where,
       skip,
       take: parseInt(limit),
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true, email: true, role: true,
-        isVerified: true, isActive: true, createdAt: true,
-      },
+      select: { id:true, email:true, role:true, isVerified:true, isActive:true, createdAt:true },
     });
 
     const total = await prisma.user.count({ where });
 
-    // Récupérer les profils
     let profils = [];
     try {
       profils = await prisma.$queryRawUnsafe(
@@ -56,13 +54,8 @@ router.get('/', async (req, res) => {
       );
     } catch {}
 
-    // Fusionner
-    let data = users.map((u) => ({
-      ...u,
-      profil: profils.find((p) => p.userId === u.id) || {},
-    }));
+    let data = users.map((u) => ({ ...u, profil: profils.find((p) => p.userId === u.id) || {} }));
 
-    // Filtre recherche (nom/prénom/email)
     if (search) {
       const s = search.toLowerCase();
       data = data.filter((u) =>
@@ -74,16 +67,14 @@ router.get('/', async (req, res) => {
       );
     }
 
-    res.json({
-      data,
-      pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) },
-    });
+    res.json({ data, pagination: { total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)) } });
   } catch (err) {
+    console.error('admin-users GET error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── GET /api/admin/users/stats ────────────────────────────────
+// ── GET /api/admin/users/stats ─────────────────────────────────
 router.get('/stats', async (req, res) => {
   try {
     const [total, patients, medecins, nonVerifies] = await Promise.all([
@@ -98,7 +89,7 @@ router.get('/stats', async (req, res) => {
   }
 });
 
-// ── PUT /api/admin/users/:id/verifier ────────────────────────
+// ── PUT /api/admin/users/:id/verifier — vérifier un médecin ────
 router.put('/:id/verifier', async (req, res) => {
   try {
     const { isVerified } = req.body;
@@ -108,7 +99,6 @@ router.put('/:id/verifier', async (req, res) => {
       select: { id:true, email:true, role:true, isVerified:true },
     });
 
-    // Notifier le médecin si vérification accordée
     if (isVerified && user.role === 'MEDECIN') {
       await prisma.$executeRawUnsafe(`
         CREATE TABLE IF NOT EXISTS "notifications_consult" (
@@ -125,7 +115,7 @@ router.put('/:id/verifier', async (req, res) => {
         `INSERT INTO "notifications_consult" ("userId","type","titre","message") VALUES ($1,$2,$3,$4)`,
         user.id, 'VERIFICATION_MEDECIN',
         '✅ Profil médecin vérifié !',
-        'Félicitations ! Votre profil médecin a été vérifié par l\'équipe AZAMED. Vous êtes maintenant visible pour les patients qui cherchent un médecin.'
+        'Félicitations ! Votre profil médecin a été vérifié par l\'équipe AZAMED. Vous êtes maintenant visible pour les patients (site public et application mobile).'
       ).catch(() => {});
     }
 
@@ -135,7 +125,7 @@ router.put('/:id/verifier', async (req, res) => {
   }
 });
 
-// ── PUT /api/admin/users/:id/activer ─────────────────────────
+// ── PUT /api/admin/users/:id/activer ────────────────────────────
 router.put('/:id/activer', async (req, res) => {
   try {
     const { isActive } = req.body;
@@ -144,16 +134,13 @@ router.put('/:id/activer', async (req, res) => {
       data:  { isActive: !!isActive },
       select: { id:true, email:true, role:true, isActive:true },
     });
-    res.json({
-      message: isActive ? 'Compte réactivé.' : 'Compte suspendu.',
-      user,
-    });
+    res.json({ message: isActive ? 'Compte réactivé.' : 'Compte suspendu.', user });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── DELETE /api/admin/users/:id ───────────────────────────────
+// ── DELETE /api/admin/users/:id ─────────────────────────────────
 router.delete('/:id', async (req, res) => {
   try {
     const user = await prisma.user.findUnique({
@@ -163,19 +150,11 @@ router.delete('/:id', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
     if (user.role === 'ADMIN') return res.status(403).json({ error: 'Impossible de supprimer un admin.' });
 
-    // Supprimer profil et données liées
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM "profils_utilisateurs" WHERE "userId" = $1`, user.id
-    ).catch(() => {});
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM "consultations" WHERE "patientId" = $1 OR "medecinId" = $1`, user.id
-    ).catch(() => {});
-    await prisma.$executeRawUnsafe(
-      `DELETE FROM "notifications_consult" WHERE "userId" = $1`, user.id
-    ).catch(() => {});
+    await prisma.$executeRawUnsafe(`DELETE FROM "profils_utilisateurs" WHERE "userId" = $1`, user.id).catch(() => {});
+    await prisma.$executeRawUnsafe(`DELETE FROM "consultations" WHERE "patientId" = $1 OR "medecinId" = $1`, user.id).catch(() => {});
+    await prisma.$executeRawUnsafe(`DELETE FROM "notifications_consult" WHERE "userId" = $1`, user.id).catch(() => {});
 
     await prisma.user.delete({ where: { id: user.id } });
-
     res.json({ message: `Compte de ${user.email} supprimé.` });
   } catch (err) {
     res.status(500).json({ error: err.message });
