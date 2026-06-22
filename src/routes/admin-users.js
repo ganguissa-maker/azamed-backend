@@ -1,4 +1,4 @@
-// src/routes/admin-users.js — Patients + Médecins (web et mobile = même table users)
+// src/routes/admin-users.js — Patients + Médecins + Délégués (web et mobile = même table users)
 const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
@@ -18,20 +18,34 @@ async function ensureProfilTable() {
       CONSTRAINT "profils_utilisateurs_pkey" PRIMARY KEY ("id")
     )
   `).catch(() => {});
+
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "profils_delegues" (
+      "id"             TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+      "userId"         TEXT NOT NULL UNIQUE,
+      "prenom"         TEXT,
+      "nom"            TEXT,
+      "telephone"      TEXT,
+      "ville"          TEXT,
+      "nomLaboratoire" TEXT,
+      "createdAt"      TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT "profils_delegues_pkey" PRIMARY KEY ("id")
+    )
+  `).catch(() => {});
 }
 
-// ── GET /api/admin/users — liste paginée (PATIENT + MEDECIN, peu importe l'origine) ──
+// ── GET /api/admin/users — liste paginée (PATIENT + MEDECIN + DELEGUE) ──
 router.get('/', async (req, res) => {
   try {
     await ensureProfilTable();
     const { search, role, isVerified, page = 1, limit = 20 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    // ✅ Note : la table "users" est UNIQUE et partagée entre le site public
-    // et l'application mobile — il n'existe pas de distinction "origine".
-    // Un compte créé sur mobile ou sur le web apparaît donc automatiquement ici.
+    // ✅ Note : la table "users" est UNIQUE et partagée entre le site public,
+    // le site structures, l'application mobile et l'espace délégué.
+    // DELEGUE est maintenant inclus dans la liste par défaut.
     const where = {
-      role: role ? role : { in: ['PATIENT', 'MEDECIN'] },
+      role: role ? role : { in: ['PATIENT', 'MEDECIN', 'DELEGUE'] },
     };
     if (isVerified === 'true')  where.isVerified = true;
     if (isVerified === 'false') where.isVerified = false;
@@ -46,15 +60,28 @@ router.get('/', async (req, res) => {
 
     const total = await prisma.user.count({ where });
 
-    let profils = [];
+    let profilsUtilisateurs = [];
+    let profilsDelegues     = [];
     try {
-      profils = await prisma.$queryRawUnsafe(
+      profilsUtilisateurs = await prisma.$queryRawUnsafe(
         `SELECT * FROM "profils_utilisateurs" WHERE "userId" = ANY($1::text[])`,
         users.map((u) => u.id)
       );
     } catch {}
+    try {
+      profilsDelegues = await prisma.$queryRawUnsafe(
+        `SELECT * FROM "profils_delegues" WHERE "userId" = ANY($1::text[])`,
+        users.map((u) => u.id)
+      );
+    } catch {}
 
-    let data = users.map((u) => ({ ...u, profil: profils.find((p) => p.userId === u.id) || {} }));
+    let data = users.map((u) => {
+      if (u.role === 'DELEGUE') {
+        const p = profilsDelegues.find((p) => p.userId === u.id) || {};
+        return { ...u, profil: { ...p, specialite: p.nomLaboratoire } }; // pour affichage générique
+      }
+      return { ...u, profil: profilsUtilisateurs.find((p) => p.userId === u.id) || {} };
+    });
 
     if (search) {
       const s = search.toLowerCase();
@@ -63,7 +90,8 @@ router.get('/', async (req, res) => {
         u.profil?.prenom?.toLowerCase().includes(s) ||
         u.profil?.nom?.toLowerCase().includes(s) ||
         u.profil?.ville?.toLowerCase().includes(s) ||
-        u.profil?.specialite?.toLowerCase().includes(s)
+        u.profil?.specialite?.toLowerCase().includes(s) ||
+        u.profil?.nomLaboratoire?.toLowerCase().includes(s)
       );
     }
 
@@ -77,13 +105,14 @@ router.get('/', async (req, res) => {
 // ── GET /api/admin/users/stats ─────────────────────────────────
 router.get('/stats', async (req, res) => {
   try {
-    const [total, patients, medecins, nonVerifies] = await Promise.all([
-      prisma.user.count({ where: { role: { in: ['PATIENT','MEDECIN'] } } }),
+    const [total, patients, medecins, delegues, nonVerifies] = await Promise.all([
+      prisma.user.count({ where: { role: { in: ['PATIENT','MEDECIN','DELEGUE'] } } }),
       prisma.user.count({ where: { role: 'PATIENT' } }),
       prisma.user.count({ where: { role: 'MEDECIN' } }),
+      prisma.user.count({ where: { role: 'DELEGUE' } }),
       prisma.user.count({ where: { role: 'MEDECIN', isVerified: false } }),
     ]);
-    res.json({ total, patients, medecins, nonVerifies });
+    res.json({ total, patients, medecins, delegues, nonVerifies });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

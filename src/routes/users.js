@@ -67,21 +67,32 @@ async function ensureTables() {
 }
 
 // ── Envoi d'email (sans dépendance bloquante) ──────────────────
-async function sendEmail(to, subject, html, fallbackLogLabel) {
-  try {
-    const nodemailer = require('nodemailer');
-    const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
-    const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
-    if (!smtpUser || !smtpPass) {
-      console.log(`📋 [${fallbackLogLabel}] (pas de SMTP configuré) → ${to}`);
-      return;
+// ✅ Envoi NON BLOQUANT — ne fait jamais attendre la requête HTTP.
+// Le code est toujours sauvegardé en base avant l'appel ; si l'email
+// échoue ou met du temps, la requête répond quand même immédiatement.
+function sendEmail(to, subject, html, fallbackLogLabel) {
+  (async () => {
+    try {
+      const nodemailer = require('nodemailer');
+      const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+      const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+      if (!smtpUser || !smtpPass) {
+        console.log(`[${fallbackLogLabel}] (pas de SMTP configure) -> ${to}`);
+        return;
+      }
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: smtpUser, pass: smtpPass },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 8000,
+      });
+      await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
+      console.log(`Email envoye a ${to} - ${subject}`);
+    } catch (e) {
+      console.log(`[${fallbackLogLabel}] Erreur envoi email (ignoree, requete deja repondue): ${e.message}`);
     }
-    const transporter = nodemailer.createTransport({ service:'gmail', auth:{ user:smtpUser, pass:smtpPass } });
-    await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
-    console.log(`✅ Email envoyé à ${to} — ${subject}`);
-  } catch (e) {
-    console.log(`📋 [${fallbackLogLabel}] Erreur envoi email: ${e.message}`);
-  }
+  })();
 }
 
 function emailTemplateCode(titre, code, sousTexte) {
@@ -139,7 +150,7 @@ router.post('/register', [
       email, code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email,
       '📧 Vérifiez votre email — AZAMED',
       emailTemplateCode('Confirmez votre adresse email pour activer votre compte AZAMED.', code, 'Votre code de vérification'),
@@ -238,7 +249,7 @@ router.post('/resend-code', async (req, res) => {
       email.toLowerCase(), code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email,
       '📧 Nouveau code de vérification — AZAMED',
       emailTemplateCode('Voici votre nouveau code de vérification.', code, 'Votre code de vérification'),
@@ -323,7 +334,7 @@ router.post('/forgot-password', async (req, res) => {
       email.toLowerCase(), code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email,
       '🔐 Code de réinitialisation — AZAMED',
       emailTemplateCode('Vous avez demandé la réinitialisation de votre mot de passe.', code, 'Votre code de réinitialisation'),

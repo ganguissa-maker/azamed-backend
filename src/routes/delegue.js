@@ -81,17 +81,26 @@ async function ensureTables() {
   `).catch(() => {});
 }
 
-async function sendEmail(to, subject, html, label) {
-  try {
-    const nodemailer = require('nodemailer');
-    const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
-    const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
-    if (!smtpUser || !smtpPass) { console.log(`[${label}] (pas de SMTP) -> ${to}`); return; }
-    const transporter = nodemailer.createTransport({ service:'gmail', auth:{ user:smtpUser, pass:smtpPass } });
-    await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
-  } catch (e) {
-    console.log(`[${label}] Erreur: ${e.message}`);
-  }
+// Envoi NON BLOQUANT — ne fait jamais attendre la requete HTTP.
+function sendEmail(to, subject, html, label) {
+  (async () => {
+    try {
+      const nodemailer = require('nodemailer');
+      const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+      const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+      if (!smtpUser || !smtpPass) { console.log(`[${label}] (pas de SMTP) -> ${to}`); return; }
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: smtpUser, pass: smtpPass },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 8000,
+      });
+      await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
+    } catch (e) {
+      console.log(`[${label}] Erreur (ignoree): ${e.message}`);
+    }
+  })();
 }
 
 function emailTemplateCode(titre, code, sousTexte) {
@@ -146,7 +155,7 @@ router.post('/register', [
       email, code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email, 'Verifiez votre email - AZAMED Delegue',
       emailTemplateCode('Confirmez votre adresse email pour activer votre compte delegue medical AZAMED.', code, 'Votre code de verification'),
       'CODE DELEGUE'
@@ -232,7 +241,7 @@ router.post('/resend-code', async (req, res) => {
     await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "email"=$1`, email.toLowerCase()).catch(() => {});
     await prisma.$executeRawUnsafe(`INSERT INTO "email_verifications" ("email","code","expiresAt") VALUES ($1,$2,$3)`, email.toLowerCase(), code, expiresAt);
 
-    await sendEmail(email, 'Nouveau code - AZAMED Delegue',
+    sendEmail(email, 'Nouveau code - AZAMED Delegue',
       emailTemplateCode('Voici votre nouveau code de verification.', code, 'Votre code de verification'), 'CODE RENVOYE DELEGUE');
 
     res.json({ message: 'Nouveau code envoye.' });

@@ -59,21 +59,32 @@ async function ensureTables() {
   `).catch(() => {});
 }
 
-async function sendEmail(to, subject, html, fallbackLogLabel) {
-  try {
-    const nodemailer = require('nodemailer');
-    const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
-    const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
-    if (!smtpUser || !smtpPass) {
-      console.log(`📋 [${fallbackLogLabel}] (pas de SMTP configuré) → ${to}`);
-      return;
+// ✅ Envoi NON BLOQUANT — ne fait jamais attendre la requête HTTP.
+// Le code est toujours sauvegardé en base avant l'appel ; si l'email
+// échoue ou met du temps, la requête répond quand même immédiatement.
+function sendEmail(to, subject, html, fallbackLogLabel) {
+  (async () => {
+    try {
+      const nodemailer = require('nodemailer');
+      const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
+      const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
+      if (!smtpUser || !smtpPass) {
+        console.log(`[${fallbackLogLabel}] (pas de SMTP configure) -> ${to}`);
+        return;
+      }
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: smtpUser, pass: smtpPass },
+        connectionTimeout: 8000,
+        greetingTimeout: 8000,
+        socketTimeout: 8000,
+      });
+      await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
+      console.log(`Email envoye a ${to} - ${subject}`);
+    } catch (e) {
+      console.log(`[${fallbackLogLabel}] Erreur envoi email (ignoree, requete deja repondue): ${e.message}`);
     }
-    const transporter = nodemailer.createTransport({ service:'gmail', auth:{ user:smtpUser, pass:smtpPass } });
-    await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
-    console.log(`✅ Email envoyé à ${to} — ${subject}`);
-  } catch (e) {
-    console.log(`📋 [${fallbackLogLabel}] Erreur envoi email: ${e.message}`);
-  }
+  })();
 }
 
 function emailTemplateCode(titre, code, sousTexte) {
@@ -96,7 +107,7 @@ function emailTemplateCode(titre, code, sousTexte) {
 // ─── POST /api/auth/register — Étape 1 : envoie le code, ne crée pas encore le compte ──
 router.post('/register', [
   body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
-  body('password').isLength({ min: 6 }).withMessage('Mot de passe : min. 6 caractères'),
+  body('password').isLength({ min: 8 }).withMessage('Mot de passe : min. 8 caractères'),
   body('typeStructure').isIn(TYPES_VALIDES).withMessage('Type d\'établissement invalide'),
   body('telephone').notEmpty().withMessage('Téléphone requis'),
   body('ville').notEmpty().withMessage('Ville requise'),
@@ -134,7 +145,7 @@ router.post('/register', [
       email, code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email,
       '📧 Vérifiez votre email — AZAMED',
       emailTemplateCode('Confirmez votre adresse email pour activer votre compte établissement AZAMED.', code, 'Votre code de vérification'),
@@ -322,7 +333,7 @@ router.post('/resend-code', async (req, res) => {
       email.toLowerCase(), code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email,
       '📧 Nouveau code de vérification — AZAMED',
       emailTemplateCode('Voici votre nouveau code de vérification.', code, 'Votre code de vérification'),
@@ -413,7 +424,7 @@ router.post('/forgot-password', async (req, res) => {
       email.toLowerCase(), code, expiresAt
     );
 
-    await sendEmail(
+    sendEmail(
       email,
       '🔐 Code de réinitialisation — AZAMED',
       emailTemplateCode('Vous avez demandé la réinitialisation de votre mot de passe établissement.', code, 'Votre code de réinitialisation'),
@@ -432,8 +443,8 @@ router.post('/reset-password', async (req, res) => {
   if (!email || !code || !newPassword) {
     return res.status(400).json({ error: 'Email, code et nouveau mot de passe requis.' });
   }
-  if (newPassword.length < 6) {
-    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 6 caractères.' });
+  if (newPassword.length < 8) {
+    return res.status(400).json({ error: 'Le mot de passe doit contenir au moins 8 caractères.' });
   }
 
   try {
