@@ -182,6 +182,9 @@ router.delete('/:id', async (req, res) => {
     await prisma.$executeRawUnsafe(`DELETE FROM "profils_utilisateurs" WHERE "userId" = $1`, user.id).catch(() => {});
     await prisma.$executeRawUnsafe(`DELETE FROM "consultations" WHERE "patientId" = $1 OR "medecinId" = $1`, user.id).catch(() => {});
     await prisma.$executeRawUnsafe(`DELETE FROM "notifications_consult" WHERE "userId" = $1`, user.id).catch(() => {});
+    // ✅ Nettoyage spécifique délégués : profil + propositions de médicaments
+    await prisma.$executeRawUnsafe(`DELETE FROM "profils_delegues" WHERE "userId" = $1`, user.id).catch(() => {});
+    await prisma.$executeRawUnsafe(`DELETE FROM "medicaments_proposes" WHERE "delegueId" = $1`, user.id).catch(() => {});
 
     await prisma.user.delete({ where: { id: user.id } });
     res.json({ message: `Compte de ${user.email} supprimé.` });
