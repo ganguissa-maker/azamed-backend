@@ -81,28 +81,33 @@ async function ensureTables() {
   `).catch(() => {});
 }
 
-// Envoi NON BLOQUANT — ne fait jamais attendre la requete HTTP.
-function sendEmail(to, subject, html, label) {
+// Envoi NON BLOQUANT via Resend (API HTTPS, jamais bloque par les
+// hebergeurs cloud, contrairement a SMTP qui pose probleme sur Railway).
+function sendEmail(to, subject, html, fallbackLogLabel) {
   (async () => {
     try {
-      const nodemailer = require('nodemailer');
-      const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
-      const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
-      if (!smtpUser || !smtpPass) { console.log(`[${label}] (pas de SMTP) -> ${to}`); return; }
-      // ✅ Port 587 + STARTTLS explicite — plus fiable que service:'gmail' (port 465)
-      // sur certains hebergeurs cloud (Railway) ou le port 465 est filtre.
-      const transporter = nodemailer.createTransport({
-        host: 'smtp.gmail.com',
-        port: 587,
-        secure: false, // STARTTLS, pas SSL direct
-        auth: { user: smtpUser, pass: smtpPass },
-        connectionTimeout: 15000,
-        greetingTimeout: 15000,
-        socketTimeout: 15000,
+      const apiKey = process.env.RESEND_API_KEY;
+      if (!apiKey) {
+        console.log(`[${fallbackLogLabel}] (pas de RESEND_API_KEY configuree) -> ${to}`);
+        return;
+      }
+      const fromAddress = process.env.RESEND_FROM || 'AZAMED <onboarding@resend.dev>';
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ from: fromAddress, to: [to], subject, html }),
       });
-      await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
+      if (!response.ok) {
+        const errText = await response.text();
+        console.log(`[${fallbackLogLabel}] Resend a refuse (${response.status}): ${errText}`);
+        return;
+      }
+      console.log(`Email envoye a ${to} via Resend - ${subject}`);
     } catch (e) {
-      console.log(`[${label}] Erreur (ignoree): ${e.message}`);
+      console.log(`[${fallbackLogLabel}] Erreur envoi email (ignoree, requete deja repondue): ${e.message}`);
     }
   })();
 }
