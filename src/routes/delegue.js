@@ -89,12 +89,16 @@ function sendEmail(to, subject, html, label) {
       const smtpUser = process.env.SMTP_USER || process.env.EMAIL_USER;
       const smtpPass = process.env.SMTP_PASS || process.env.EMAIL_PASS;
       if (!smtpUser || !smtpPass) { console.log(`[${label}] (pas de SMTP) -> ${to}`); return; }
+      // ✅ Port 587 + STARTTLS explicite — plus fiable que service:'gmail' (port 465)
+      // sur certains hebergeurs cloud (Railway) ou le port 465 est filtre.
       const transporter = nodemailer.createTransport({
-        service: 'gmail',
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false, // STARTTLS, pas SSL direct
         auth: { user: smtpUser, pass: smtpPass },
-        connectionTimeout: 8000,
-        greetingTimeout: 8000,
-        socketTimeout: 8000,
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 15000,
       });
       await transporter.sendMail({ from:`"AZAMED" <${smtpUser}>`, to, subject, html });
     } catch (e) {
