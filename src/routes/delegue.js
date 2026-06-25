@@ -1,4 +1,4 @@
-// src/routes/delegue.js — Délégués médicaux : inscription + propositions médicaments
+// src/routes/delegue.js — Delegues medicaux : inscription directe + propositions medicaments
 const express = require('express');
 const router  = express.Router();
 const bcrypt  = require('bcryptjs');
@@ -10,10 +10,6 @@ const prisma = new PrismaClient();
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES_IN || '30d' });
-
-function generateCode() {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
 
 async function ensureTables() {
   await prisma.$executeRawUnsafe(`
@@ -49,27 +45,6 @@ async function ensureTables() {
   `).catch(() => {});
 
   await prisma.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "email_verifications" (
-      "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
-      "email" TEXT NOT NULL, "code" TEXT NOT NULL,
-      "expiresAt" TIMESTAMP(3) NOT NULL, "used" BOOLEAN NOT NULL DEFAULT false,
-      "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT "email_verifications_pkey" PRIMARY KEY ("id")
-    )
-  `).catch(() => {});
-
-  await prisma.$executeRawUnsafe(`
-    CREATE TABLE IF NOT EXISTS "inscriptions_delegues_attente" (
-      "id"           TEXT NOT NULL DEFAULT gen_random_uuid()::text,
-      "email"        TEXT NOT NULL UNIQUE,
-      "passwordHash" TEXT NOT NULL,
-      "donnees"      TEXT NOT NULL,
-      "createdAt"    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      CONSTRAINT "inscriptions_delegues_attente_pkey" PRIMARY KEY ("id")
-    )
-  `).catch(() => {});
-
-  await prisma.$executeRawUnsafe(`
     CREATE TABLE IF NOT EXISTS "notifications_consult" (
       "id" TEXT NOT NULL DEFAULT gen_random_uuid()::text,
       "userId" TEXT NOT NULL, "type" TEXT NOT NULL,
@@ -81,54 +56,7 @@ async function ensureTables() {
   `).catch(() => {});
 }
 
-// Envoi NON BLOQUANT via Resend (API HTTPS, jamais bloque par les
-// hebergeurs cloud, contrairement a SMTP qui pose probleme sur Railway).
-function sendEmail(to, subject, html, fallbackLogLabel) {
-  (async () => {
-    try {
-      const apiKey = process.env.RESEND_API_KEY;
-      if (!apiKey) {
-        console.log(`[${fallbackLogLabel}] (pas de RESEND_API_KEY configuree) -> ${to}`);
-        return;
-      }
-      const fromAddress = process.env.RESEND_FROM || 'AZAMED <onboarding@resend.dev>';
-      const response = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ from: fromAddress, to: [to], subject, html }),
-      });
-      if (!response.ok) {
-        const errText = await response.text();
-        console.log(`[${fallbackLogLabel}] Resend a refuse (${response.status}): ${errText}`);
-        return;
-      }
-      console.log(`Email envoye a ${to} via Resend - ${subject}`);
-    } catch (e) {
-      console.log(`[${fallbackLogLabel}] Erreur envoi email (ignoree, requete deja repondue): ${e.message}`);
-    }
-  })();
-}
-
-function emailTemplateCode(titre, code, sousTexte) {
-  return `
-    <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px">
-      <h2 style="color:#0284c7">AZAMED</h2>
-      <p>${titre}</p>
-      <div style="background:#f0f9ff;border-radius:12px;padding:20px;text-align:center;margin:20px 0">
-        <p style="margin:0;font-size:14px;color:#64748b">${sousTexte}</p>
-        <p style="font-size:36px;font-weight:900;color:#0284c7;letter-spacing:8px;margin:8px 0">${code}</p>
-        <p style="margin:0;font-size:12px;color:#94a3b8">Valide pendant 15 minutes</p>
-      </div>
-      <hr style="border:none;border-top:1px solid #e2e8f0;margin:20px 0"/>
-      <p style="color:#94a3b8;font-size:12px">AZAMED - Annuaire Sante Cameroun</p>
-    </div>
-  `;
-}
-
-// AUTHENTIFICATION DELEGUE
+// AUTHENTIFICATION DELEGUE (inscription directe, sans verification email)
 
 router.post('/register', [
   body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
@@ -147,67 +75,13 @@ router.post('/register', [
     if (existing) return res.status(400).json({ error: 'Cet email est deja utilise.' });
 
     const passwordHash = await bcrypt.hash(password, 12);
-    const donnees = JSON.stringify({ prenom, nom, telephone, ville, nomLaboratoire });
-
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "inscriptions_delegues_attente" ("email","passwordHash","donnees")
-       VALUES ($1,$2,$3)
-       ON CONFLICT ("email") DO UPDATE SET "passwordHash"=$2,"donnees"=$3,"createdAt"=NOW()`,
-      email, passwordHash, donnees
-    );
-
-    const code      = generateCode();
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "email"=$1`, email).catch(() => {});
-    await prisma.$executeRawUnsafe(
-      `INSERT INTO "email_verifications" ("email","code","expiresAt") VALUES ($1,$2,$3)`,
-      email, code, expiresAt
-    );
-
-    sendEmail(
-      email, 'Verifiez votre email - AZAMED Delegue',
-      emailTemplateCode('Confirmez votre adresse email pour activer votre compte delegue medical AZAMED.', code, 'Votre code de verification'),
-      'CODE DELEGUE'
-    );
-
-    res.status(200).json({ message: 'Un code de verification a ete envoye a votre email.', email });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/verify-email', async (req, res) => {
-  const { email, code } = req.body;
-  if (!email || !code) return res.status(400).json({ error: 'Email et code requis.' });
-
-  try {
-    await ensureTables();
-
-    const rows = await prisma.$queryRawUnsafe(
-      `SELECT * FROM "email_verifications"
-       WHERE "email"=$1 AND "code"=$2 AND "used"=false AND "expiresAt" > NOW()
-       ORDER BY "createdAt" DESC LIMIT 1`,
-      email.toLowerCase(), code.trim()
-    );
-    if (!rows || rows.length === 0) {
-      return res.status(400).json({ error: 'Code invalide ou expire. Demandez un nouveau code.' });
-    }
-
-    const pendingRows = await prisma.$queryRawUnsafe(
-      `SELECT * FROM "inscriptions_delegues_attente" WHERE "email"=$1`, email.toLowerCase()
-    );
-    if (!pendingRows || pendingRows.length === 0) {
-      return res.status(400).json({ error: 'Inscription introuvable. Recommencez le processus.' });
-    }
-    const pending = pendingRows[0];
-    const donnees = JSON.parse(pending.donnees);
 
     const user = await prisma.user.create({
       data: {
         email: email.toLowerCase(),
-        passwordHash: pending.passwordHash,
+        passwordHash,
         role: 'DELEGUE',
-        isVerified: false,
+        isVerified: false, // verifie par l'admin ensuite, comme les medecins
         isActive: true,
       },
     });
@@ -216,45 +90,20 @@ router.post('/verify-email', async (req, res) => {
       `INSERT INTO "profils_delegues" ("userId","prenom","nom","telephone","ville","nomLaboratoire")
        VALUES ($1,$2,$3,$4,$5,$6)
        ON CONFLICT ("userId") DO UPDATE SET "prenom"=$2,"nom"=$3,"telephone"=$4,"ville"=$5,"nomLaboratoire"=$6`,
-      user.id, donnees.prenom||null, donnees.nom||null, donnees.telephone||null, donnees.ville||null, donnees.nomLaboratoire
+      user.id, prenom||null, nom||null, telephone||null, ville||null, nomLaboratoire
     );
-
-    await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "id"=$1`, rows[0].id);
-    await prisma.$executeRawUnsafe(`DELETE FROM "inscriptions_delegues_attente" WHERE "email"=$1`, email.toLowerCase());
 
     const token = generateToken(user.id);
     res.status(201).json({
-      message: 'Compte cree et verifie avec succes !',
+      message: 'Compte cree avec succes !',
       token,
       user: {
         id: user.id, email: user.email, role: user.role, isVerified: user.isVerified,
-        profil: { prenom: donnees.prenom, nom: donnees.nom, telephone: donnees.telephone, ville: donnees.ville, nomLaboratoire: donnees.nomLaboratoire },
+        profil: { prenom, nom, telephone, ville, nomLaboratoire },
       },
     });
   } catch (err) {
     if (err.code === 'P2002') return res.status(400).json({ error: 'Email deja utilise.' });
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/resend-code', async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email requis.' });
-  try {
-    await ensureTables();
-    const pending = await prisma.$queryRawUnsafe(`SELECT * FROM "inscriptions_delegues_attente" WHERE "email"=$1`, email.toLowerCase());
-    if (!pending || pending.length === 0) return res.status(400).json({ error: 'Aucune inscription en attente pour cet email.' });
-
-    const code      = generateCode();
-    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-    await prisma.$executeRawUnsafe(`UPDATE "email_verifications" SET "used"=true WHERE "email"=$1`, email.toLowerCase()).catch(() => {});
-    await prisma.$executeRawUnsafe(`INSERT INTO "email_verifications" ("email","code","expiresAt") VALUES ($1,$2,$3)`, email.toLowerCase(), code, expiresAt);
-
-    sendEmail(email, 'Nouveau code - AZAMED Delegue',
-      emailTemplateCode('Voici votre nouveau code de verification.', code, 'Votre code de verification'), 'CODE RENVOYE DELEGUE');
-
-    res.json({ message: 'Nouveau code envoye.' });
-  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
@@ -301,6 +150,28 @@ router.get('/me', protect, async (req, res) => {
       if (rows?.[0]) profil = rows[0];
     } catch {}
     res.json({ user: { ...user, profil } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── POST /api/delegue/reset-password-direct — réinitialisation directe ──
+router.post('/reset-password-direct', [
+  body('email').isEmail().normalizeEmail(),
+  body('newPassword').isLength({ min: 8 }).withMessage('Le nouveau mot de passe doit contenir au moins 8 caracteres.'),
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ error: errors.array()[0].msg });
+
+  const { email, newPassword } = req.body;
+  try {
+    const user = await prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+    if (!user || user.role !== 'DELEGUE') return res.status(400).json({ error: 'Aucun compte délégué trouvé avec cet email.' });
+
+    const passwordHash = await bcrypt.hash(newPassword, 12);
+    await prisma.user.update({ where: { id: user.id }, data: { passwordHash } });
+
+    res.json({ message: 'Mot de passe réinitialisé avec succès.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
