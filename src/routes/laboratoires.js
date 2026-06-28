@@ -1,12 +1,42 @@
-// src/routes/laboratoires.js
+// src/routes/laboratoires.js — Quote-part visible uniquement par les médecins
 const express = require('express');
 const router  = express.Router();
+const jwt     = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
 const { protect, structureOnly } = require('../middleware/auth');
 const prisma = new PrismaClient();
 
-// GET /api/laboratoires — liste publique
-router.get('/', async (req, res) => {
+// ✅ Authentification optionnelle : ne bloque jamais la requête, mais si un
+// token valide de médecin est présent, req.isMedecin est mis à true.
+// Permet de garder la route /laboratoires publique tout en personnalisant
+// la réponse pour les médecins connectés (affichage de la quote-part).
+async function optionalMedecinAuth(req, res, next) {
+  req.isMedecin = false;
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token   = authHeader.split(' ')[1];
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const user    = await prisma.user.findUnique({ where: { id: decoded.id } });
+      if (user && user.role === 'MEDECIN' && user.isActive) {
+        req.isMedecin = true;
+      }
+    }
+  } catch {
+    // Token absent/invalide/expiré : on continue simplement sans privilège médecin
+  }
+  next();
+}
+
+// ✅ Retire les champs quote-part d'une structure si le visiteur n'est pas médecin
+function filtrerQuotePart(structure, isMedecin) {
+  if (isMedecin) return structure;
+  const { offresQuotePart, quotePartPourcentage, ...rest } = structure;
+  return rest;
+}
+
+// GET /api/laboratoires — liste publique (quote-part visible UNIQUEMENT pour les médecins)
+router.get('/', optionalMedecinAuth, async (req, res) => {
   try {
     const TYPES = ['LABORATOIRE','CENTRE_IMAGERIE','LABO_ET_IMAGERIE'];
     const { search, type, ville, page=1, limit=15 } = req.query;
@@ -17,11 +47,33 @@ router.get('/', async (req, res) => {
       { nomCommercial:{ contains:search, mode:'insensitive' } },
       { ville:        { contains:search, mode:'insensitive' } },
     ];
-    const [data, total] = await Promise.all([
+    const [rawData, total] = await Promise.all([
       prisma.structure.findMany({ where, skip, take:parseInt(limit), orderBy:{ nomCommercial:'asc' },
         include:{ abonnements:{ orderBy:{ createdAt:'desc' }, take:1 } } }),
       prisma.structure.count({ where }),
     ]);
+
+    // ✅ Récupère offresQuotePart/quotePartPourcentage (colonnes hors schema Prisma standard)
+    let quotePartMap = {};
+    if (req.isMedecin && rawData.length > 0) {
+      try {
+        const ids = rawData.map((s) => s.id);
+        const rows = await prisma.$queryRawUnsafe(
+          `SELECT id, "offresQuotePart", "quotePartPourcentage" FROM "structures" WHERE id = ANY($1::text[])`,
+          ids
+        );
+        rows.forEach((r) => { quotePartMap[r.id] = r; });
+      } catch {}
+    }
+
+    const data = rawData.map((s) => {
+      const enrichie = req.isMedecin
+        ? { ...s, offresQuotePart: quotePartMap[s.id]?.offresQuotePart || false,
+            quotePartPourcentage: quotePartMap[s.id]?.quotePartPourcentage ?? null }
+        : s;
+      return filtrerQuotePart(enrichie, req.isMedecin);
+    });
+
     res.json({ data, pagination:{ total, page:parseInt(page), pages:Math.ceil(total/parseInt(limit)) } });
   } catch(err) { res.status(500).json({ error:err.message }); }
 });
