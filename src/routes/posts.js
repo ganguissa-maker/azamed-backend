@@ -6,7 +6,36 @@ const path    = require('path');
 const fs      = require('fs');
 const { PrismaClient } = require('@prisma/client');
 const { protect, structureOnly } = require('../middleware/auth');
+const cron = require('node-cron');
 const prisma = new PrismaClient();
+
+// ── Actualités valables 24h : expiration automatique ───────────
+const DUREE_VIE_MS = 24 * 60 * 60 * 1000; // 24 heures
+
+async function expireOldPosts() {
+  try {
+    const limite = new Date(Date.now() - DUREE_VIE_MS);
+
+    const result = await prisma.post.updateMany({
+      where: {
+        isActive: true,
+        createdAt: { lt: limite },
+      },
+      data: { isActive: false },
+    });
+
+    if (result.count > 0) {
+      console.log(`[expireOldPosts] ${result.count} publication(s) désactivée(s) (> 24h).`);
+    }
+  } catch (err) {
+    console.error('[expireOldPosts] Erreur:', err.message);
+  }
+}
+
+// Vérifie toutes les 10 minutes + une fois immédiatement au démarrage
+cron.schedule('*/10 * * * *', expireOldPosts);
+expireOldPosts();
+
 
 // ── Config multer : stockage local dans /uploads ──────────────
 const uploadDir = path.join(__dirname, '../../uploads');
