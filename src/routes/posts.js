@@ -6,36 +6,7 @@ const path    = require('path');
 const fs      = require('fs');
 const { PrismaClient } = require('@prisma/client');
 const { protect, structureOnly } = require('../middleware/auth');
-const cron = require('node-cron');
 const prisma = new PrismaClient();
-
-// ── Actualités valables 24h : expiration automatique ───────────
-const DUREE_VIE_MS = 24 * 60 * 60 * 1000; // 24 heures
-
-async function expireOldPosts() {
-  try {
-    const limite = new Date(Date.now() - DUREE_VIE_MS);
-
-    const result = await prisma.post.updateMany({
-      where: {
-        isActive: true,
-        createdAt: { lt: limite },
-      },
-      data: { isActive: false },
-    });
-
-    if (result.count > 0) {
-      console.log(`[expireOldPosts] ${result.count} publication(s) désactivée(s) (> 24h).`);
-    }
-  } catch (err) {
-    console.error('[expireOldPosts] Erreur:', err.message);
-  }
-}
-
-// Vérifie toutes les 10 minutes + une fois immédiatement au démarrage
-cron.schedule('*/10 * * * *', expireOldPosts);
-expireOldPosts();
-
 
 // ── Config multer : stockage local dans /uploads ──────────────
 const uploadDir = path.join(__dirname, '../../uploads');
@@ -65,7 +36,15 @@ router.get('/', async (req, res) => {
     const { structureId, limit = 20, page = 1 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
-    const where = { isApproved: true, isActive: true };
+    // Une publication expire 24h apres sa creation (expiresAt)
+    const where = {
+      isApproved: true,
+      isActive: true,
+      OR: [
+        { expiresAt: null },
+        { expiresAt: { gt: new Date() } },
+      ],
+    };
     if (structureId) where.structureId = structureId;
 
     const [data, total] = await Promise.all([
@@ -108,6 +87,9 @@ router.post('/', protect, structureOnly, upload.single('media'), async (req, res
       mediaUrl = `${baseUrl}/uploads/${req.file.filename}`;
     }
 
+    // Expiration automatique 24h apres la publication
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
     const post = await prisma.post.create({
       data: {
         contenu:    contenu.trim(),
@@ -116,6 +98,7 @@ router.post('/', protect, structureOnly, upload.single('media'), async (req, res
         mediaUrl,
         isApproved: true,
         isActive:   true,
+        expiresAt,
       },
       include: {
         structure: { include: { abonnements: { orderBy: { createdAt: 'desc' }, take: 1 } } },
@@ -184,7 +167,13 @@ router.get('/mes', protect, structureOnly, async (req, res) => {
       where: { structureId },
       orderBy: [{ isPinned: 'desc' }, { createdAt: 'desc' }],
     });
-    res.json({ data });
+    // Indique si chaque publication est expiree (visible cote dashboard structure)
+    const now = new Date();
+    const dataAvecStatut = data.map((p) => ({
+      ...p,
+      isExpired: p.expiresAt ? new Date(p.expiresAt) <= now : false,
+    }));
+    res.json({ data: dataAvecStatut });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
