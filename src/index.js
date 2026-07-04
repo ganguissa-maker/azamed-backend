@@ -15,6 +15,12 @@ const morgan   = require('morgan');
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
+// ✅ Railway (et la plupart des PaaS) font du reverse-proxy en HTTPS vers votre
+// conteneur en HTTP interne. Sans "trust proxy", req.protocol renvoie toujours
+// "http", ce qui génère des mediaUrl en http:// bloquées par les navigateurs
+// (mixed content) sur un site chargé en https://.
+app.set('trust proxy', 1);
+
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan('dev'));
 app.use(express.json({ limit: '10mb' }));
