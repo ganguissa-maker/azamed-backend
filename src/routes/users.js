@@ -129,6 +129,28 @@ router.get('/me', protect, async (req, res) => {
   }
 });
 
+// ── PUT /api/users/me/profil — modifier ses propres infos de profil ──
+router.put('/me/profil', protect, async (req, res) => {
+  try {
+    await ensureTables();
+    const { prenom, nom, ville, telephone, specialite, numeroOrdre, lieuExercice } = req.body;
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO "profils_utilisateurs" ("userId","prenom","nom","ville","telephone","specialite","numeroOrdre","lieuExercice")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       ON CONFLICT ("userId") DO UPDATE SET
+         "prenom"=$2,"nom"=$3,"ville"=$4,"telephone"=$5,"specialite"=$6,"numeroOrdre"=$7,"lieuExercice"=$8`,
+      req.user.id, prenom||null, nom||null, ville||null, telephone||null,
+      specialite||null, numeroOrdre||null, lieuExercice||null
+    );
+
+    const rows = await prisma.$queryRawUnsafe(`SELECT * FROM "profils_utilisateurs" WHERE "userId"=$1`, req.user.id);
+    res.json({ message:'Profil mis à jour avec succès.', profil: rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/users/reset-password-direct — réinitialisation directe (sans code) ──
 // L'utilisateur fournit son email + son ancien mot de passe pour prouver son identité,
 // puis choisit un nouveau mot de passe. Pas d'envoi d'email nécessaire.
