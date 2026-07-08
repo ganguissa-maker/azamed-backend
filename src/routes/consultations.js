@@ -326,8 +326,11 @@ router.put('/propositions/:propId/refuser', protect, async (req, res) => {
 
     await prisma.$executeRawUnsafe(`UPDATE "consultation_propositions" SET "statut"='REFUSEE', "updatedAt"=NOW() WHERE "id"=$1`, proposition.id);
 
+    const profilPat  = await getProfil(req.user.id);
+    const patientNom  = profilPat.prenom ? `${profilPat.prenom} ${profilPat.nom || ''}`.trim() : 'Le patient';
+
     await notifier(proposition.medecinId, 'PROPOSITION_REFUSEE', '❌ Proposition refusée',
-      'Le patient a refusé votre proposition. La demande reste ouverte pour d\'autres médecins.',
+      `${patientNom} a refusé votre proposition. La demande reste ouverte pour d'autres médecins.`,
       { consultationId: consultation.id });
 
     res.json({ message:'Proposition refusée.' });
