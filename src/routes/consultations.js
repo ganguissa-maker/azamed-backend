@@ -7,8 +7,8 @@ const prisma = new PrismaClient();
 
 // ✅ GRILLE TARIFAIRE FIXE — le médecin ne peut pas la modifier
 const TARIFS = {
-  GENERALISTE: { CABINET: 5000,  DOMICILE: 10000 },
-  SPECIALISTE: { CABINET: 15000, DOMICILE: 20000 },
+  GENERALISTE: { CABINET: 10000, DOMICILE: 15000 },
+  SPECIALISTE: { CABINET: 20000, DOMICILE: 25000 },
 };
 
 function calculerPrix(typeConsultation, lieu) {
